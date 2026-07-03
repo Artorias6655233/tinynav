@@ -226,7 +226,7 @@ class MapNode(Node):
         self.loop_similarity_threshold = 0.90
         self.loop_top_k = 1
 
-        self.relocalization_threshold = 0.85
+        self.relocalization_threshold = 0.75
         self.relocalization_loop_top_k = 3
 
         os.makedirs(f"{tinynav_db_path}/nav_temp", exist_ok=True)
