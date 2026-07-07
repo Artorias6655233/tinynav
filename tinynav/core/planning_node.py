@@ -155,7 +155,7 @@ class ObstacleConfig:
     robot_z_top: float = 0.3
     occ_threshold: float = 0.1
     min_wall_span_m: float = 0.2
-    dilation_cells: int = 2
+    dilation_cells: int = 0
 
 
 def build_obstacle_map(occupancy_grid, origin, resolution, robot_z, config=None):

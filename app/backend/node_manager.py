@@ -1300,7 +1300,7 @@ class BackendNode(Ros2NodeManager):
         latch a single Twist command.
         """
         dwell_s = 5.0
-        angular_speed = 0.4  # rad/s
+        angular_speed = 0.6  # rad/s
         cmd_rate_hz = 10.0
         yaw_tolerance = math.radians(2.0)
         step_deg = 20.0
