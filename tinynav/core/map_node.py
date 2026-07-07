@@ -641,7 +641,7 @@ class MapNode(Node):
             poi = self.pois[self.poi_index]
             diff_position_norm_xy = np.linalg.norm(poi[:2] - pos[:2])
             diff_position_norm_z = abs(poi[2] - pos[2])
-            if diff_position_norm_xy < 0.5 and diff_position_norm_z < 2.0:
+            if diff_position_norm_xy < 0.2 and diff_position_norm_z < 2.0:
                 self.nav_progress_pub.publish(String(data=json.dumps(self._nav_progress_payload(
                     percent=100.0,
                     path_remaining_m=0.0,

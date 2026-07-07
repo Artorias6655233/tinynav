@@ -1520,6 +1520,12 @@ class BackendNode(Ros2NodeManager):
         '/planning/trajectory_path',
         '/planning/occupied_voxels',
         '/planning/footprint',
+        '/tf',
+        '/mapping/current_pose_in_map',
+        '/mapping/poi',
+        '/mapping/pose_graph_trajectory',
+        '/planning/occupancy_grid',
+        '/planning/obstacle_mask',
     ]
 
     def cmd_debug_record_start(self):
