@@ -187,7 +187,7 @@ class BackendNode(Ros2NodeManager):
         self._cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
 
         # Sensor mode detection and image subscriptions
-        self._sensor_mode: str = 'unknown'  # 'looper' | 'realsense' | 'unknown'
+        self._sensor_mode: str = 'looper'  # 'looper' | 'realsense' | 'unknown'
         self._image_subs: dict = {}
         self._last_frame: dict[str, bytes] = {}   # topic -> latest JPEG bytes
         self._last_frame_time: dict[str, float] = {}
@@ -794,9 +794,9 @@ class BackendNode(Ros2NodeManager):
             if '/insight_full' in result.stdout.splitlines():
                 self._sensor_mode = 'looper'
                 self.get_logger().info('Sensor mode: looper — launching looper bridge + planning')
-            else:
-                self._sensor_mode = 'realsense'
-                self.get_logger().info('Sensor mode: realsense — launching driver + perception + planning')
+            # else:
+            #     self._sensor_mode = 'realsense'
+            #     self.get_logger().info('Sensor mode: realsense — launching driver + perception + planning')
 
             if self._sensor_mode == 'looper' and self._vio_status_sub is None:
                 self._vio_status_sub = self.create_subscription(

@@ -248,6 +248,7 @@ class MapNode(Node):
         self.failed_relocalizations = []
 
         self.T_from_map_to_odom = None
+        self.freeze_map_to_odom_after_init = False
 
         self.pois = {}
         self.poi_meta = {}
@@ -362,6 +363,8 @@ class MapNode(Node):
 
     def keyframe_callback(self, keyframe_image_msg:Image, keyframe_odom_msg:Odometry, depth_msg:Image):
         self.keyframe_mapping(keyframe_image_msg, keyframe_odom_msg, depth_msg)
+        if self.freeze_map_to_odom_after_init and self.T_from_map_to_odom is not None:
+            return
         image = self.bridge.imgmsg_to_cv2(keyframe_image_msg, desired_encoding="mono8")
 
         success, pose_in_world = self.keyframe_relocalization(keyframe_image_msg.header.stamp, image)
@@ -641,7 +644,7 @@ class MapNode(Node):
             poi = self.pois[self.poi_index]
             diff_position_norm_xy = np.linalg.norm(poi[:2] - pos[:2])
             diff_position_norm_z = abs(poi[2] - pos[2])
-            if diff_position_norm_xy < 0.2 and diff_position_norm_z < 2.0:
+            if diff_position_norm_xy < 0.3 and diff_position_norm_z < 2.0:
                 self.nav_progress_pub.publish(String(data=json.dumps(self._nav_progress_payload(
                     percent=100.0,
                     path_remaining_m=0.0,
