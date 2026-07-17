@@ -223,10 +223,10 @@ class MapNode(Node):
         self.relative_pose_constraint = []
         self.last_keyframe_timestamp = None
 
-        self.loop_similarity_threshold = 0.90
-        self.loop_top_k = 1
+        self.loop_similarity_threshold = 0.85
+        self.loop_top_k = 2
 
-        self.relocalization_threshold = 0.75
+        self.relocalization_threshold = 0.85
         self.relocalization_loop_top_k = 3
 
         os.makedirs(f"{tinynav_db_path}/nav_temp", exist_ok=True)
@@ -485,7 +485,7 @@ class MapNode(Node):
             reference_keyframe_pose = self.map_poses[timestamp_in_map]
             reference_depth, _, reference_features, _, _ = self.db.get_depth_embedding_features_images(timestamp_in_map)
             reference_matched_keypoints, keyframe_matched_keypoints, matches = self.match_keypoints(reference_features, keyframe_features)
-            if len(matches) < 50:
+            if len(matches) < 65:
                 print(f"not enough matched features to relocalize, {len(matches)} < 50")
                 continue
 
@@ -493,7 +493,7 @@ class MapNode(Node):
             point_3d_in_world_list = point_3d_in_world[inliers]
             point_2d_in_keyframe_list = keyframe_matched_keypoints[inliers]
             point_count = len(point_2d_in_keyframe_list)
-            if point_count <= 80:
+            if point_count <= 90:
                 print(f"not enough landmarks to relocalize, {point_count}")
                 continue
             pnp_candidates.append((point_3d_in_world_list, point_2d_in_keyframe_list))
