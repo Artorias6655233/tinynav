@@ -26,6 +26,7 @@ class CmdVelControlNode(Node):
             [1, 0, 0, 0],
             [0, 0, 0, 1]]
         )
+        self.R_path_pose_to_robot = self.T_robot_to_camera[:3, :3].copy()
         self.last_path_time = 0.0
         self.pose = None
         self.path = None
@@ -40,7 +41,7 @@ class CmdVelControlNode(Node):
         self.path_stale_stop_factor = 5.0
         self.max_linear_acc = 0.6   # m/s^2
         self.max_angular_acc = 0.8  # rad/s^2
-        self.max_angular_speed = 0.8  # rad/s
+        self.max_angular_speed = 1.5  # rad/s
         self.planner_dt = 0.1       # trajectory dt in planning_node
         # planning_node publishes path with for j in range(..., step=10), so points are ~1.0 s apart.
         self.path_pose_stride = 10
@@ -66,12 +67,14 @@ class CmdVelControlNode(Node):
         # planner's selected heading jittered near the boundary.
         self.rotate_first_enter_threshold = 0.45  # rad, ~26 deg
         self.rotate_first_exit_threshold = np.deg2rad(15.0)
+        self.rotate_in_place_translation_epsilon = 0.08
 
         self.latest_cmd = Twist()
         self.prev_cmd = Twist()
         self._linear_engaged = False
         self._angular_engaged = False
         self._rotate_first_engaged = False
+        self._rotate_sign = 0.0
         self.last_cmd_pub_time = time.monotonic()
         self.last_path_update_time = None
         self._paused = False
@@ -88,7 +91,7 @@ class CmdVelControlNode(Node):
             self.prev_cmd = Twist()
             self._linear_engaged = False
             self._angular_engaged = False
-            self._rotate_first_engaged = False
+            self._reset_rotate_state()
 
     def _on_nav_active(self, msg: Bool):
         was_active = self._nav_active
@@ -98,7 +101,7 @@ class CmdVelControlNode(Node):
             self.prev_cmd = Twist()
             self._linear_engaged = False
             self._angular_engaged = False
-            self._rotate_first_engaged = False
+            self._reset_rotate_state()
             self.last_path_update_time = None
             # Send one stop when navigation is deactivated, then stay silent so
             # manual teleop can own /cmd_vel without being overwritten by zeros.
@@ -109,6 +112,10 @@ class CmdVelControlNode(Node):
 
     def _clamp_step(self, target: float, current: float, max_delta: float) -> float:
         return float(np.clip(target - current, -max_delta, max_delta) + current)
+
+    def _reset_rotate_state(self):
+        self._rotate_first_engaged = False
+        self._rotate_sign = 0.0
 
     def cmd_timer_callback(self):
         now = time.monotonic()
@@ -123,6 +130,7 @@ class CmdVelControlNode(Node):
             self.prev_cmd = Twist()
             self._linear_engaged = False
             self._angular_engaged = False
+            self._reset_rotate_state()
             return
 
         # Stale-path protection: slow down, then stop if planner has not refreshed.
@@ -149,6 +157,7 @@ class CmdVelControlNode(Node):
             out.angular.z = 0.0
             self._linear_engaged = False
             self._angular_engaged = False
+            self._reset_rotate_state()
             self.cmd_pub.publish(out)
             self.prev_cmd = out
             return
@@ -226,11 +235,19 @@ class CmdVelControlNode(Node):
         T1 = msg2np(self.path.poses[0])
         step_idx = int(min(self.lookahead_steps, len(self.path.poses) - 1))
         T2 = msg2np(self.path.poses[step_idx])
-        T_robot_1 = T1 @ self.T_robot_to_camera
-        T_robot_2 = T2 @ self.T_robot_to_camera
+        # planning_node publishes robot-center positions, but the quaternion still follows
+        # the camera-oriented frame. Rotate only the attitude into the robot frame here:
+        # applying the full rigid transform would inject a fake translation arc during
+        # in-place turns, which makes heading_err and angular.z flip sign near 180 deg.
+        T_robot_1 = T1.copy()
+        T_robot_2 = T2.copy()
+        T_robot_1[:3, :3] = T1[:3, :3] @ self.R_path_pose_to_robot
+        T_robot_2[:3, :3] = T2[:3, :3] @ self.R_path_pose_to_robot
         T_robot_2_to_1 = np.linalg.inv(T_robot_1) @ T_robot_2
         p = T_robot_2_to_1[:3, 3]
         heading_err = float(np.arctan2(p[1], p[0]))
+        yaw_err = float(np.arctan2(T_robot_2_to_1[1, 0], T_robot_2_to_1[0, 0]))
+        turn_err = yaw_err if np.hypot(p[0], p[1]) < self.rotate_in_place_translation_epsilon else heading_err
         # dt must match actual spacing between published Path poses, not raw trajectory dt.
         dt = self.planner_dt * self.path_pose_stride * max(1, step_idx)
         linear_velocity_vec = p / dt
@@ -251,19 +268,24 @@ class CmdVelControlNode(Node):
         # Hack: if path first segment points >80 deg away from robot heading,
         # force an in-place turn. Skip explicit backward segments because reverse
         # naturally has heading_err close to +/-pi.
-        if (not is_backward_segment) and abs(heading_err) > self.force_turn_heading_threshold:
+        rotate_threshold = self.rotate_first_exit_threshold if self._rotate_first_engaged else self.rotate_first_enter_threshold
+        force_rotate = (not is_backward_segment) and abs(turn_err) > self.force_turn_heading_threshold
+        rotate_first = vx > 0.0 and abs(turn_err) > rotate_threshold
+        if force_rotate or rotate_first:
+            sign_source = turn_err
+            if abs(sign_source) < 1e-3:
+                sign_source = vyaw
+            if abs(sign_source) < 1e-3:
+                sign_source = self.prev_cmd.angular.z
+            if (not self._rotate_first_engaged) or self._rotate_sign == 0.0:
+                self._rotate_sign = float(np.sign(sign_source)) if abs(sign_source) >= 1e-3 else 1.0
+            turn_gain = 1.0 if force_rotate else 1.6
+            turn_limit = self.max_angular_speed if force_rotate else 1.0
             vx = 0.0
-            vyaw = float(np.clip(heading_err, -self.max_angular_speed, self.max_angular_speed))
-            self._rotate_first_engaged = True
-        # Minimal rotate-first gate: apply only for forward motion. Hysteresis: engaging
-        # requires rotate_first_enter_threshold, but once engaged, stays engaged until
-        # heading_err drops below the smaller rotate_first_exit_threshold.
-        elif vx > 0.0 and abs(heading_err) > (self.rotate_first_exit_threshold if self._rotate_first_engaged else self.rotate_first_enter_threshold):
-            vx = 0.0
-            vyaw = float(np.clip(1.6 * heading_err, -0.6, 0.6))
+            vyaw = float(self._rotate_sign * np.clip(turn_gain * abs(turn_err), 0.0, turn_limit))
             self._rotate_first_engaged = True
         else:
-            self._rotate_first_engaged = False
+            self._reset_rotate_state()
 
         vyaw = float(np.clip(vyaw, -self.max_angular_speed, self.max_angular_speed))
 
@@ -276,6 +298,7 @@ class CmdVelControlNode(Node):
         age = 0.0 if self.last_path_update_time is None else (time.monotonic() - self.last_path_update_time)
         self.logger.debug(
             f"cmd vx={self.latest_cmd.linear.x:.3f} vyaw={self.latest_cmd.angular.z:.3f} "
+            f"turn_err={turn_err:.3f} heading_err={heading_err:.3f} yaw_err={yaw_err:.3f} "
             f"path_age={age:.2f}s path_dt_ema={self.path_period_ema:.2f}s lookahead={step_idx}"
         )
 
@@ -304,3 +327,4 @@ def main(args=None):
         
 if __name__ == '__main__':
     main()
+
