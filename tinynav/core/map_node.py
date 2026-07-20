@@ -248,7 +248,7 @@ class MapNode(Node):
         self.failed_relocalizations = []
 
         self.T_from_map_to_odom = None
-        self.freeze_map_to_odom_after_init = False
+        self.freeze_map_to_odom_after_init = True
 
         self.pois = {}
         self.poi_meta = {}

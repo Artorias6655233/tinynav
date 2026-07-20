@@ -4,7 +4,10 @@ from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelSubscri
 from unitree_sdk2py.idl.geometry_msgs.msg.dds_ import Twist_
 from unitree_sdk2py.idl.std_msgs.msg.dds_ import String_
 from unitree_sdk2py.idl.unitree_go.msg.dds_ import LowState_
-from unitree_sdk2py.b2.sport.sport_client import SportClient as SportClientB2
+# from unitree_sdk2py.b2.sport.sport_client import SportClient as SportClientB2
+from unitree_sdk2py.go2.sport.sport_client import SportClient as SportClientB2
+from unitree_sdk2py.go2.obstacles_avoid.obstacles_avoid_client import ObstaclesAvoidCl
+ient
 from std_msgs.msg import Float32, String
 from enum import Enum
 import logging
@@ -27,8 +30,14 @@ class Ros2UnitreeManagerNode(Node):
         super().__init__('ros2_unitree_manager')
         self.channel = self._init_channel_with_retry(networkInterface)
         self.sport_client = SportClientB2()
+        self.obstacles_avoid_client = ObstaclesAvoidClient()
         self.sport_client.SetTimeout(10.0)
         self.sport_client.Init()
+        time.sleep(5)
+        self.obstacles_avoid_client.SetTimeout(3.0)
+        self.obstacles_avoid_client.Init()
+        self.obstacles_avoid_client.SwitchSet(False)
+        # self.sport_client.SwitchGait(1)
         self.sport_client.SwitchGait(1)
         self._robot_status = RobotStatus.SITTING
         self.battery = 0.0
@@ -117,3 +126,4 @@ def main(args=None):
 
 if __name__ == "__main__":
     main()
+
