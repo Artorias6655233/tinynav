@@ -4,10 +4,9 @@ from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelSubscri
 from unitree_sdk2py.idl.geometry_msgs.msg.dds_ import Twist_
 from unitree_sdk2py.idl.std_msgs.msg.dds_ import String_
 from unitree_sdk2py.idl.unitree_go.msg.dds_ import LowState_
-# from unitree_sdk2py.b2.sport.sport_client import SportClient as SportClientB2
-from unitree_sdk2py.go2.sport.sport_client import SportClient as SportClientB2
-from unitree_sdk2py.go2.obstacles_avoid.obstacles_avoid_client import ObstaclesAvoidCl
-ient
+from unitree_sdk2py.b2.sport.sport_client import SportClient as SportClientB2
+# from unitree_sdk2py.go2.sport.sport_client import SportClient as SportClientB2
+from unitree_sdk2py.go2.obstacles_avoid.obstacles_avoid_client import ObstaclesAvoidClient
 from std_msgs.msg import Float32, String
 from enum import Enum
 import logging
