@@ -21,7 +21,8 @@ class NavProgress {
         percent: (json['percent'] as num?)?.toDouble() ?? 0.0,
         pathRemainingM: (json['path_remaining_m'] as num?)?.toDouble() ?? 0.0,
         pathTotalM: (json['path_total_m'] as num?)?.toDouble() ?? 0.0,
-        estimatedRemainingS: (json['estimated_remaining_s'] as num?)?.toDouble() ?? -1.0,
+        estimatedRemainingS:
+            (json['estimated_remaining_s'] as num?)?.toDouble() ?? -1.0,
       );
 }
 
@@ -39,6 +40,8 @@ class DeviceStatus {
   final bool locAssistEnabled;
   final bool debugRecording;
   final int poiMarkCount;
+  final String? activeMapName;
+  final bool freezeMapToOdomAfterInit;
 
   const DeviceStatus({
     required this.online,
@@ -54,6 +57,8 @@ class DeviceStatus {
     required this.locAssistEnabled,
     required this.debugRecording,
     required this.poiMarkCount,
+    this.activeMapName,
+    required this.freezeMapToOdomAfterInit,
   });
 
   factory DeviceStatus.fromJson(Map<String, dynamic> json) => DeviceStatus(
@@ -70,6 +75,9 @@ class DeviceStatus {
         locAssistEnabled: json['locAssistEnabled'] as bool? ?? false,
         debugRecording: json['debugRecording'] as bool? ?? false,
         poiMarkCount: (json['poiMarkCount'] as num?)?.toInt() ?? 0,
+        activeMapName: json['activeMapName'] as String?,
+        freezeMapToOdomAfterInit:
+            json['freezeMapToOdomAfterInit'] as bool? ?? false,
       );
 }
 
@@ -80,7 +88,12 @@ class Pose {
   final double? z;
   final double? timestamp;
 
-  const Pose({required this.x, required this.y, required this.yaw, this.z, this.timestamp});
+  const Pose(
+      {required this.x,
+      required this.y,
+      required this.yaw,
+      this.z,
+      this.timestamp});
 
   factory Pose.fromJson(Map<String, dynamic> json) => Pose(
         x: (json['x'] as num).toDouble(),
@@ -229,10 +242,10 @@ class PlanningState {
       return Pose.fromJson(raw as Map<String, dynamic>);
     }
 
-    List<TrajPoint> parsePath(String key) =>
-        (j[key] as List? ?? []).map((p) {
+    List<TrajPoint> parsePath(String key) => (j[key] as List? ?? []).map((p) {
           final m = p as Map<String, dynamic>;
-          return TrajPoint((m['x'] as num).toDouble(), (m['y'] as num).toDouble());
+          return TrajPoint(
+              (m['x'] as num).toDouble(), (m['y'] as num).toDouble());
         }).toList();
 
     return PlanningState(
@@ -256,7 +269,8 @@ class PlanningState {
           : null,
       footprint: (j['footprint'] as List? ?? []).map((p) {
         final m = p as Map<String, dynamic>;
-        return TrajPoint((m['x'] as num).toDouble(), (m['y'] as num).toDouble());
+        return TrajPoint(
+            (m['x'] as num).toDouble(), (m['y'] as num).toDouble());
       }).toList(),
       voxelPoints: (j['voxel_points'] as List? ?? []).map((p) {
         final m = p as Map<String, dynamic>;
@@ -359,3 +373,4 @@ class Poi {
     );
   }
 }
+

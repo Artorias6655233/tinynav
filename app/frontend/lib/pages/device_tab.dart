@@ -28,12 +28,16 @@ class DeviceTab extends ConsumerWidget {
             children: statusAsync.when(
               data: (s) => [
                 _InfoRow('Status', s.online ? 'Online' : 'Offline',
-                    valueColor: s.online ? const Color(0xFF34C759) : Colors.red),
+                    valueColor:
+                        s.online ? const Color(0xFF34C759) : Colors.red),
                 _InfoRow('IP', ip),
                 _InfoRow('State', s.rawState),
+                _InfoRow('Map', s.activeMapName ?? '—',
+                    dimmed: s.activeMapName == null),
               ],
               loading: () => [const _LoadingRow()],
-              error: (e, _) => [_InfoRow('Error', '$e', valueColor: Colors.red)],
+              error: (e, _) =>
+                  [_InfoRow('Error', '$e', valueColor: Colors.red)],
             ),
           ),
           const SizedBox(height: 12),
@@ -54,6 +58,19 @@ class DeviceTab extends ConsumerWidget {
                 ),
                 loading: () => const _LoadingRow(),
                 error: (_, __) => const _InfoRow('Mode', '—'),
+              ),
+              statusAsync.when(
+                data: (s) => _InfoRow(
+                  'Reloc Mode',
+                  s.freezeMapToOdomAfterInit
+                      ? 'Init Reloc -> VIO only'
+                      : 'Continuous Reloc',
+                  valueColor: s.freezeMapToOdomAfterInit
+                      ? const Color(0xFF34C759)
+                      : const Color(0xFF9EC7E8),
+                ),
+                loading: () => const _LoadingRow(),
+                error: (_, __) => const _InfoRow('Reloc Mode', '—'),
               ),
             ],
           ),
@@ -95,7 +112,8 @@ class DeviceTab extends ConsumerWidget {
                   ],
                 ),
                 loading: () => const _LoadingRow(),
-                error: (_, __) => const _InfoRow('System', 'unavailable', dimmed: true),
+                error: (_, __) =>
+                    const _InfoRow('System', 'unavailable', dimmed: true),
               ),
             ],
           ),
@@ -158,7 +176,8 @@ class _InfoRow extends StatelessWidget {
   final Color? valueColor;
   final bool dimmed;
 
-  const _InfoRow(this.label, this.value, {this.valueColor, this.dimmed = false});
+  const _InfoRow(this.label, this.value,
+      {this.valueColor, this.dimmed = false});
 
   @override
   Widget build(BuildContext context) {
@@ -180,7 +199,8 @@ class _InfoRow extends StatelessWidget {
             child: Align(
               alignment: Alignment.centerRight,
               child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                 decoration: BoxDecoration(
                   color: const Color(0xFF1A2532),
                   borderRadius: BorderRadius.circular(8),
@@ -212,7 +232,12 @@ class _LoadingRow extends StatelessWidget {
   Widget build(BuildContext context) {
     return const Padding(
       padding: EdgeInsets.symmetric(vertical: 8),
-      child: Center(child: SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))),
+      child: Center(
+          child: SizedBox(
+              width: 18,
+              height: 18,
+              child: CircularProgressIndicator(strokeWidth: 2))),
     );
   }
 }
+

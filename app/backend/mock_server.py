@@ -29,6 +29,8 @@ _state: dict = {
     'mapping_percent': 0.0,
     'navigating': False,
     'raw_state': 'idle',
+    'active_map_name': 'yishang_lijialin_vio',
+    'freeze_map_to_odom_after_init': True,
 }
 
 _pois: dict[str, dict] = {
@@ -78,6 +80,8 @@ def _build_status() -> dict:
         'mappingPercent': s['mapping_percent'],
         'navStatus': 'navigating' if s['navigating'] else 'idle',
         'rawState': s['raw_state'],
+        'activeMapName': s['active_map_name'],
+        'freezeMapToOdomAfterInit': s['freeze_map_to_odom_after_init'],
     }
 
 
@@ -282,3 +286,4 @@ async def ws_map_update(ws: WebSocket):
 if __name__ == '__main__':
     import uvicorn
     uvicorn.run(app, host='0.0.0.0', port=8000, reload=False)
+

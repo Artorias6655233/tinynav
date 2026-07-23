@@ -21,7 +21,9 @@ class NavTab extends ConsumerWidget {
           statusAsync.when(
             data: (s) => _NavStatusCard(status: s),
             loading: () => const Card(
-              child: Padding(padding: EdgeInsets.all(32), child: Center(child: CircularProgressIndicator())),
+              child: Padding(
+                  padding: EdgeInsets.all(32),
+                  child: Center(child: CircularProgressIndicator())),
             ),
             error: (e, _) => Card(
               child: Padding(
@@ -34,35 +36,41 @@ class NavTab extends ConsumerWidget {
           Card(
             child: Padding(
               padding: const EdgeInsets.all(16),
-              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                const Row(children: [
-                  Icon(Icons.place_outlined, size: 20),
-                  SizedBox(width: 8),
-                  Text('Select Destination',
-                      style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-                ]),
-                const Divider(height: 20),
-                poisAsync.when(
-                  data: (pois) => pois.isEmpty
-                      ? const Center(
-                          child: Padding(
-                            padding: EdgeInsets.all(20),
-                            child: Text(
-                              'No POIs available.\nAdd them in the Map tab first.',
-                              style: TextStyle(color: Colors.grey),
-                              textAlign: TextAlign.center,
+              child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Row(children: [
+                      Icon(Icons.place_outlined, size: 20),
+                      SizedBox(width: 8),
+                      Text('Select Destination',
+                          style: TextStyle(
+                              fontWeight: FontWeight.bold, fontSize: 16)),
+                    ]),
+                    const Divider(height: 20),
+                    poisAsync.when(
+                      data: (pois) => pois.isEmpty
+                          ? const Center(
+                              child: Padding(
+                                padding: EdgeInsets.all(20),
+                                child: Text(
+                                  'No POIs available.\nAdd them in the Map tab first.',
+                                  style: TextStyle(color: Colors.grey),
+                                  textAlign: TextAlign.center,
+                                ),
+                              ),
+                            )
+                          : Column(
+                              children: pois
+                                  .map((poi) => _PoiTile(
+                                      poi: poi, statusAsync: statusAsync))
+                                  .toList(),
                             ),
-                          ),
-                        )
-                      : Column(
-                          children: pois
-                              .map((poi) => _PoiTile(poi: poi, statusAsync: statusAsync))
-                              .toList(),
-                        ),
-                  loading: () => const Center(child: CircularProgressIndicator()),
-                  error: (e, _) => Text('$e', style: const TextStyle(color: Colors.red)),
-                ),
-              ]),
+                      loading: () =>
+                          const Center(child: CircularProgressIndicator()),
+                      error: (e, _) =>
+                          Text('$e', style: const TextStyle(color: Colors.red)),
+                    ),
+                  ]),
             ),
           ),
         ],
@@ -120,7 +128,8 @@ class _NavStatusCardState extends ConsumerState<_NavStatusCard> {
   Widget build(BuildContext context) {
     final s = widget.status;
     final isNavigating = s.rawState == 'navigation';
-    final np = isNavigating ? ref.watch(navProgressStreamProvider).valueOrNull : null;
+    final np =
+        isNavigating ? ref.watch(navProgressStreamProvider).valueOrNull : null;
     final showCompletion = _showCompletion;
 
     String subtitle;
@@ -130,7 +139,9 @@ class _NavStatusCardState extends ConsumerState<_NavStatusCard> {
       progressValue = 1.0;
     } else if (isNavigating && np != null) {
       progressValue = (np.percent / 100.0).clamp(0.0, 1.0);
-      final remaining = np.pathRemainingM < 1000 ? '${np.pathRemainingM.toStringAsFixed(1)}m' : '--';
+      final remaining = np.pathRemainingM < 1000
+          ? '${np.pathRemainingM.toStringAsFixed(1)}m'
+          : '--';
       final eta = np.estimatedRemainingS >= 0
           ? '~${np.estimatedRemainingS.toStringAsFixed(0)}s'
           : '--';
@@ -145,6 +156,11 @@ class _NavStatusCardState extends ConsumerState<_NavStatusCard> {
 
     final active = isNavigating || showCompletion;
     final progressColor = showCompletion ? Colors.green : Colors.blue;
+    final relocModeLabel = s.freezeMapToOdomAfterInit
+        ? 'Init Reloc -> VIO only'
+        : 'Continuous Reloc';
+    final relocModeColor =
+        s.freezeMapToOdomAfterInit ? Colors.green : Colors.blueGrey;
 
     return Card(
       child: Padding(
@@ -158,14 +174,18 @@ class _NavStatusCardState extends ConsumerState<_NavStatusCard> {
             ),
             const SizedBox(width: 12),
             Expanded(
-              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                const Text('Navigation',
-                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-                Text(
-                  subtitle,
-                  style: TextStyle(color: active ? progressColor : Colors.grey),
-                ),
-              ]),
+              child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text('Navigation',
+                        style: TextStyle(
+                            fontWeight: FontWeight.bold, fontSize: 16)),
+                    Text(
+                      subtitle,
+                      style: TextStyle(
+                          color: active ? progressColor : Colors.grey),
+                    ),
+                  ]),
             ),
             if (isNavigating)
               OutlinedButton(
@@ -180,6 +200,23 @@ class _NavStatusCardState extends ConsumerState<_NavStatusCard> {
                     : const Text('Cancel'),
               ),
           ]),
+          const SizedBox(height: 10),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            decoration: BoxDecoration(
+              color: relocModeColor.withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(999),
+              border: Border.all(color: relocModeColor.withValues(alpha: 0.35)),
+            ),
+            child: Text(
+              relocModeLabel,
+              style: TextStyle(
+                color: relocModeColor,
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
           if (active) ...[
             const SizedBox(height: 10),
             ClipRRect(
@@ -187,7 +224,7 @@ class _NavStatusCardState extends ConsumerState<_NavStatusCard> {
               child: LinearProgressIndicator(
                 value: progressValue,
                 color: progressColor,
-                backgroundColor: progressColor.withOpacity(0.15),
+                backgroundColor: progressColor.withValues(alpha: 0.15),
                 minHeight: 6,
               ),
             ),
@@ -224,7 +261,9 @@ class _PoiTileState extends ConsumerState<_PoiTile> {
   Future<void> _go() async {
     setState(() => _loading = true);
     try {
-      await ref.read(dioProvider).post('/nav/go-to-poi', data: {'poi_id': widget.poi.id});
+      await ref
+          .read(dioProvider)
+          .post('/nav/go-to-poi', data: {'poi_id': widget.poi.id});
     } on DioException catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -265,3 +304,4 @@ class _PoiTileState extends ConsumerState<_PoiTile> {
     );
   }
 }
+

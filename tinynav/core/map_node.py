@@ -29,6 +29,21 @@ import einops
 from tinynav.core.build_map_node import OdomPoseRecorder
 logger = logging.getLogger(__name__)
 
+_VIO_CONFIG_FILE = "vio_config.json"
+
+
+def load_vio_config(tinynav_map_path: str) -> dict:
+    config_path = os.path.join(tinynav_map_path, _VIO_CONFIG_FILE)
+    if not os.path.exists(config_path):
+        return {}
+    try:
+        with open(config_path) as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception as exc:
+        logger.warning(f"Failed to read {_VIO_CONFIG_FILE} from {tinynav_map_path}: {exc}")
+        return {}
+
 
 
 def draw_image_match_origin(prev_image: np.ndarray, curr_image: np.ndarray, prev_keypoints: np.ndarray, curr_keypoints: np.ndarray, matches: np.ndarray):
@@ -231,6 +246,7 @@ class MapNode(Node):
 
         os.makedirs(f"{tinynav_db_path}/nav_temp", exist_ok=True)
         self.nav_temp_db = TinyNavDB(f"{tinynav_db_path}/nav_temp", is_scratch=True)
+        self.vio_config = load_vio_config(tinynav_map_path)
         self.map_poses = np.load(f"{tinynav_map_path}/poses.npy", allow_pickle=True).item()
         self.map_K = np.load(f"{tinynav_map_path}/intrinsics.npy")
         self.db = TinyNavDB(tinynav_map_path, is_scratch=False)
@@ -248,7 +264,13 @@ class MapNode(Node):
         self.failed_relocalizations = []
 
         self.T_from_map_to_odom = None
-        self.freeze_map_to_odom_after_init = False
+        self.freeze_map_to_odom_after_init = bool(
+            self.vio_config.get("freeze_map_to_odom_after_init", False)
+        )
+        self.get_logger().info(
+            f"Loaded {_VIO_CONFIG_FILE}: "
+            f"freeze_map_to_odom_after_init={self.freeze_map_to_odom_after_init}"
+        )
 
         self.pois = {}
         self.poi_meta = {}
@@ -809,3 +831,4 @@ def main(args=None):
 
 if __name__ == '__main__':
     main()
+

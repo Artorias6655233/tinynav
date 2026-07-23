@@ -69,6 +69,7 @@ _PREVIEW_PROFILES = {
 }
 _VIO_STATUS_NORMAL = {'TRACKING', 'TRACKING_STATIC'}
 _POI_MARKS_FILE = 'poi_marks.json'
+_VIO_CONFIG_FILE = 'vio_config.json'
 
 
 def _resize_preview_frame(arr: np.ndarray, max_edge_px: int = _PREVIEW_MAX_EDGE_PX) -> np.ndarray:
@@ -443,6 +444,18 @@ class BackendNode(Ros2NodeManager):
             return None
         return None
 
+    def _load_current_map_vio_config(self) -> dict:
+        config_path = os.path.join(self.map_path, _VIO_CONFIG_FILE)
+        if not os.path.exists(config_path):
+            return {}
+        try:
+            with open(config_path) as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except Exception as e:
+            self.get_logger().warn(f'Failed to read {_VIO_CONFIG_FILE}: {e}')
+            return {}
+
     def _load_map_handoff_rule(
         self,
         poi_index: int,
@@ -493,6 +506,20 @@ class BackendNode(Ros2NodeManager):
             self.get_logger().error(f'Invalid map handoff poi_list: {poi_list!r}')
             return None
         return {'target_map': target_map, 'poi_list': poi_list}
+
+    @staticmethod
+    def _default_vio_config() -> dict:
+        return {
+            'freeze_map_to_odom_after_init': False,
+        }
+
+    def _ensure_map_vio_config(self, map_path: str):
+        config_path = os.path.join(map_path, _VIO_CONFIG_FILE)
+        if os.path.exists(config_path):
+            return
+        with open(config_path, 'w') as f:
+            json.dump(self._default_vio_config(), f, indent=2)
+            f.write('\n')
 
     def _set_active_map_link(self, map_name: str):
         import shutil
@@ -1051,6 +1078,11 @@ class BackendNode(Ros2NodeManager):
             vio_guard_enabled = self._sensor_mode == 'looper'
             vio_status = self._vio_status if vio_guard_enabled else None
             vio_guard_stopped = self._vio_guard_stopped if vio_guard_enabled else False
+        active_map_name = self._active_map_name()
+        vio_config = self._load_current_map_vio_config()
+        freeze_map_to_odom_after_init = bool(
+            vio_config.get('freeze_map_to_odom_after_init', False)
+        )
         bag_files_exist = self.active_bag_path is not None
         map_files_exist = os.path.exists(os.path.join(self.map_path, 'occupancy_grid.npy'))
         return {
@@ -1069,6 +1101,8 @@ class BackendNode(Ros2NodeManager):
             'vioGuardEnabled': vio_guard_enabled,
             'vioStatus': vio_status,
             'vioGuardStopped': vio_guard_stopped,
+            'activeMapName': active_map_name,
+            'freezeMapToOdomAfterInit': freeze_map_to_odom_after_init,
             'debugRecording': self.debug_recording,
         }
 
@@ -1720,6 +1754,8 @@ class BackendNode(Ros2NodeManager):
                 )
             self.get_logger().info('Auto-created home POI at (0,0,0)')
 
+        self._ensure_map_vio_config(dest)
+
         self._stop_all()
         self.state = 'idle'
         self._pub_state()
@@ -1999,3 +2035,4 @@ class NodeRunner:
                             proc.kill()
                         except Exception:
                             pass
+
