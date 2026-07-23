@@ -1,5 +1,6 @@
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile
 from sensor_msgs.msg import Image, CameraInfo, PointField
 from nav_msgs.msg import Path, Odometry, OccupancyGrid
 from cv_bridge import CvBridge
@@ -12,58 +13,20 @@ from rclpy.time import Time
 from sensor_msgs.msg import PointCloud2, PointCloud
 from geometry_msgs.msg import PoseStamped, Point32
 import sensor_msgs_py.point_cloud2 as pc2
-from std_msgs.msg import Header
+from std_msgs.msg import Bool, Header
 from codetiming import Timer
 import cv2
 from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
+from tinynav.core.robot_geometry import GO2_CONFIG, camera_pose_to_control_center_pose
 
 
-@dataclass
-class RobotConfig:
-    """Robot geometry. Body frame: +x forward, +y left."""
-    name: str = 'go2'
-    shape: str = 'square'
-    length: float = 0.7
-    width: float = 0.3
-    radius: float = 0.3
-    camera_x: float = 0.35
-    camera_y: float = 0.0
-    control_x: float = 0.0
-    control_y: float = 0.0
-    safety_radius: float = 0.1
-
-    @property
-    def cam_offset_3d(self):
-        """Offset [left, up, forward] from control center to camera in body frame."""
-        return np.array([self.camera_y - self.control_y, 0.0, self.camera_x - self.control_x], dtype=np.float32)
-
-    @property
-    def half_size(self):
-        if self.shape == 'circle':
-            return (self.radius, self.radius)
-        return (self.length / 2.0, self.width / 2.0)
-
-    def footprint_from_control(self):
-        """Returns (front_len, rear_len, half_w) relative to control center."""
-        hl, hw = self.half_size
-        return float(hl - self.control_x), float(hl + self.control_x), float(hw)
+def wrap_angle_rad(angle: float) -> float:
+    return float(np.arctan2(np.sin(angle), np.cos(angle)))
 
 
-GO2_CONFIG = RobotConfig(
-    name='go2', shape='square',
-    length=0.4, width=0.3,
-    camera_x=0.2, camera_y=0.0,
-    control_x=0.0, control_y=0.0,
-    safety_radius=0.2,
-)
+def yaw_from_matrix(rotation: np.ndarray) -> float:
+    return float(np.arctan2(rotation[1, 0], rotation[0, 0]))
 
-B2_CONFIG = RobotConfig(
-    name='b2', shape='square',
-    length=1.0, width=0.5,
-    camera_x=0.5, camera_y=0.0,
-    control_x=-0.5, control_y=0.0,
-    safety_radius=0.1,
-)
 
 # === Helper functions ===
 @njit(cache=True)
@@ -359,6 +322,8 @@ class PlanningNode(Node):
         )
         self.bridge = CvBridge()
         self.path_pub = self.create_publisher(Path, '/planning/trajectory_path', 10)
+        _latched_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.final_yaw_align_pub = self.create_publisher(Bool, '/planning/final_yaw_align_active', _latched_qos)
         self.height_map_pub = self.create_publisher(Image, "/planning/height_map", 10)
         self.obstacle_mask_pub = self.create_publisher(OccupancyGrid, '/planning/obstacle_mask', 10)
         self.footprint_pub = self.create_publisher(PointCloud, '/planning/footprint', 10)
@@ -391,25 +356,67 @@ class PlanningNode(Node):
 
         self.create_subscription(Odometry, '/control/target_pose', self.target_pose_callback, 10)
         self.target_pose = None
+        self.target_yaw_align_distance_m = 0.35
+        self.target_yaw_done_threshold_rad = np.deg2rad(8.0)
+        self._final_yaw_align_active = False
 
         self.poi_change_sub = self.create_subscription(Odometry, "/mapping/poi_change", self.poi_change_callback, 10)
 
     def poi_change_callback(self, msg):
         self.target_pose = None
+        self._publish_final_yaw_align_active(False)
+
+    def _publish_final_yaw_align_active(self, active: bool):
+        active = bool(active)
+        if self._final_yaw_align_active == active:
+            return
+        self._final_yaw_align_active = active
+        self.final_yaw_align_pub.publish(Bool(data=active))
 
     def target_pose_callback(self, msg):
-        self.target_pose = np.array([msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z])
+        target_yaw = None
+        position_frame = "camera"
+        position_locked = False
+        if msg.twist.twist.angular.x > 0.5:
+            target_quat = np.array([
+                msg.pose.pose.orientation.x,
+                msg.pose.pose.orientation.y,
+                msg.pose.pose.orientation.z,
+                msg.pose.pose.orientation.w,
+            ], dtype=np.float64)
+            if np.all(np.isfinite(target_quat)):
+                target_yaw = yaw_from_matrix(quat_to_matrix(target_quat))
+        if msg.twist.twist.angular.y > 0.5:
+            position_frame = "control_center"
+        if msg.twist.twist.angular.z > 0.5:
+            position_locked = True
+        self.target_pose = {
+            'position': np.array([msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z]),
+            'yaw': target_yaw,
+            'position_frame': position_frame,
+            'position_locked': position_locked,
+        }
 
-    def _target_heading_error(self, T, target_pose):
-        if target_pose is None:
+    def _target_reference_position(self, T: np.ndarray, position_frame: str) -> np.ndarray:
+        if position_frame == "control_center":
+            return self.camera_to_robot_center(T)
+        return T[:3, 3]
+
+    def _target_heading_error(self, T, target_position, position_frame: str):
+        if target_position is None:
             return None
-        center = self.camera_to_robot_center(T)
+        center = self._target_reference_position(T, position_frame)
         forward = T[:3, :3] @ np.array([0.0, 0.0, 1.0])
         left = T[:3, :3] @ np.array([1.0, 0.0, 0.0])
-        to_target = target_pose - center
+        to_target = target_position - center
         forward_dist = float(np.dot(to_target[:2], forward[:2]))
         left_dist = float(np.dot(to_target[:2], left[:2]))
         return float(np.arctan2(left_dist, forward_dist))
+
+    def _target_yaw_error(self, T, target_yaw):
+        if target_yaw is None:
+            return None
+        return wrap_angle_rad(float(target_yaw) - yaw_from_matrix(T[:3, :3]))
 
     def _update_behind_target_mode(self, heading_error):
         if heading_error is None:
@@ -443,7 +450,7 @@ class PlanningNode(Node):
 
     def camera_to_robot_center(self, T):
         """World control-center position derived from camera pose T_cam->world."""
-        return T[:3, 3] - T[:3, :3] @ self.robot.cam_offset_3d
+        return camera_pose_to_control_center_pose(T, self.robot)[:3, 3]
 
     def publish_footprint(self, T, stamp):
         """Publish robot footprint rectangle as a PointCloud for RViz."""
@@ -641,10 +648,30 @@ class PlanningNode(Node):
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             front_clearance = self._front_obstacle_dist(T, obstacle_mask)
             enter_threshold = 0.30
-            target_heading_error = self._target_heading_error(T, self.target_pose)
+            target_position = self.target_pose['position'] if self.target_pose is not None else None
+            target_yaw = self.target_pose.get('yaw') if self.target_pose is not None else None
+            target_position_frame = self.target_pose.get('position_frame', 'camera') if self.target_pose is not None else 'camera'
+            target_position_locked = bool(self.target_pose.get('position_locked', False)) if self.target_pose is not None else False
+            target_heading_error = self._target_heading_error(T, target_position, target_position_frame)
+            target_yaw_error = self._target_yaw_error(T, target_yaw)
             self._update_behind_target_mode(target_heading_error)
             behind_target_mode = self.behind_target_mode
             behind_turn_sign = self.behind_turn_sign
+            distance_to_target = None
+            if target_position is not None:
+                ref_position = self._target_reference_position(T, target_position_frame)
+                distance_to_target = float(np.linalg.norm((ref_position - target_position)[:2]))
+            final_yaw_align_mode = (
+                target_yaw_error is not None
+                and (
+                    target_position_locked
+                    or (
+                        distance_to_target is not None
+                        and distance_to_target <= self.target_yaw_align_distance_m
+                    )
+                )
+                and abs(target_yaw_error) > self.target_yaw_done_threshold_rad
+            )
 
             # path
             path = Path()
@@ -652,13 +679,27 @@ class PlanningNode(Node):
             path.header.frame_id = "world"
 
             if self.target_pose is None:
+                self._publish_final_yaw_align_active(False)
                 return
 
             if all(s == float('inf') for s in scores):
+                self._publish_final_yaw_align_active(False)
                 self.get_logger().info('All trajectories in collision, stopping path.')
                 return
 
-            if behind_target_mode:
+            self._publish_final_yaw_align_active(final_yaw_align_mode)
+
+            if final_yaw_align_mode:
+                yaw_abs = abs(float(target_yaw_error))
+                desired_turn_speed = float(np.clip(1.2 * yaw_abs, 0.4, 2.0))
+                yaw_turn_sign = -1.0 if target_yaw_error >= 0.0 else 1.0
+                rotate_costs = np.where(
+                    (np.abs(params[:, 0]) < 1e-6) & (np.sign(params[:, 1]) == yaw_turn_sign),
+                    np.abs(np.abs(params[:, 1]) - desired_turn_speed),
+                    np.inf,
+                )
+                top_indices = np.array([int(np.argmin(rotate_costs))])
+            elif behind_target_mode:
                 # In behind-target mode, do not let the normal cost planner compete.
                 # Publish a fixed in-place rotation trajectory until heading error exits the hysteresis band.
                 fixed_turn_speed = 1.0
@@ -669,7 +710,7 @@ class PlanningNode(Node):
                 )
                 top_indices = np.array([int(np.argmin(rotate_costs))])
             else:
-                def cost_function(traj, param, score, target_pose):
+                def cost_function(traj, param, score, goal_position):
                     # predefined backward trajectory penalty
                     is_backward_traj = param[0] < 0.0
                     should_reverse = front_clearance <= enter_threshold
@@ -681,13 +722,13 @@ class PlanningNode(Node):
 
                     # regular trajectory penalty
                     traj_end = np.array(traj[-1,:3])
-                    target_end = target_pose if target_pose is not None else traj_end
+                    target_end = goal_position if goal_position is not None else traj_end
                     dist = np.linalg.norm(traj_end - target_end)
 
                     return score * 100000 + 100 * dist + 10 * abs(self.last_param[0] - param[0]) + 10 * abs(self.last_param[1] - param[1]) + reverse_gate_penalty
 
                 top_k = 1
-                top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores[i], self.target_pose) for i in range(len(trajectories))]), kind='stable')[:top_k]
+                top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores[i], target_position) for i in range(len(trajectories))]), kind='stable')[:top_k]
 
             self.last_param = params[top_indices[0]]
 

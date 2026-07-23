@@ -2,21 +2,27 @@
 POI management — reads/writes pois.json in the map directory.
 
 pois.json schema:
-  { "<id_str>": {"id": int, "name": str, "position": [x, y, z]} }
+  {
+    "<id_str>": {
+      "id": int,
+      "name": str,
+      "position": [x, y, z],
+      "position_frame": "control_center" | "camera",
+      "yaw_deg": float | null
+    }
+  }
 """
 from __future__ import annotations
 
 import json
 import os
-import uuid
-from typing import Optional
-
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from ..state import runner
 
 router = APIRouter(tags=['poi'])
+_VALID_POSITION_FRAMES = {'camera', 'control_center'}
 
 
 def _require_node():
@@ -45,6 +51,8 @@ def _save_pois(node, pois: dict):
 class PoiCreateRequest(BaseModel):
     name: str
     position: list[float]   # [x, y, z]
+    position_frame: str = 'control_center'
+    yaw_deg: float | None = None
 
 
 @router.get('/map/pois')
@@ -59,6 +67,8 @@ def create_poi(req: PoiCreateRequest):
     node = _require_node()
     if len(req.position) != 3:
         raise HTTPException(400, 'position must be [x, y, z]')
+    if req.position_frame not in _VALID_POSITION_FRAMES:
+        raise HTTPException(400, 'position_frame must be "camera" or "control_center"')
     pois = _load_pois(node)
 
     # Use next integer ID
@@ -69,6 +79,8 @@ def create_poi(req: PoiCreateRequest):
         'id': new_id,
         'name': req.name,
         'position': req.position,
+        'position_frame': req.position_frame,
+        'yaw_deg': req.yaw_deg,
     }
     _save_pois(node, pois)
     return pois[str(new_id)]
@@ -84,3 +96,4 @@ def delete_poi(poi_id: int):
     del pois[key]
     _save_pois(node, pois)
     return {'ok': True}
+

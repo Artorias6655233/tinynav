@@ -17,6 +17,7 @@ from cv_bridge import CvBridge
 import cv2
 from codetiming import Timer
 import argparse
+from tinynav.core.robot_geometry import GO2_CONFIG, camera_pose_to_control_center_pose
 
 from tinynav.tinynav_cpp_bind import pose_graph_solve
 from tinynav.core.models_trt import LightGlueTRT, Dinov2TRT, SuperPointTRT
@@ -30,6 +31,8 @@ from tinynav.core.build_map_node import OdomPoseRecorder
 logger = logging.getLogger(__name__)
 
 _VIO_CONFIG_FILE = "vio_config.json"
+_POI_YAW_DONE_THRESHOLD_RAD = np.deg2rad(8.0)
+_POI_YAW_ALIGN_TIMEOUT_S = 10.0
 
 
 def load_vio_config(tinynav_map_path: str) -> dict:
@@ -43,6 +46,28 @@ def load_vio_config(tinynav_map_path: str) -> dict:
     except Exception as exc:
         logger.warning(f"Failed to read {_VIO_CONFIG_FILE} from {tinynav_map_path}: {exc}")
         return {}
+
+
+def wrap_angle_rad(angle: float) -> float:
+    return float(np.arctan2(np.sin(angle), np.cos(angle)))
+
+
+def yaw_from_matrix(rotation: np.ndarray) -> float:
+    return float(np.arctan2(rotation[1, 0], rotation[0, 0]))
+
+
+def pose_from_position_yaw(position: np.ndarray, yaw_rad: float | None) -> np.ndarray:
+    pose = np.eye(4)
+    pose[:3, 3] = np.asarray(position, dtype=np.float64)
+    if yaw_rad is not None:
+        c = np.cos(yaw_rad)
+        s = np.sin(yaw_rad)
+        pose[:3, :3] = np.array([
+            [c, -s, 0.0],
+            [s, c, 0.0],
+            [0.0, 0.0, 1.0],
+        ])
+    return pose
 
 
 
@@ -267,6 +292,8 @@ class MapNode(Node):
         self.freeze_map_to_odom_after_init = bool(
             self.vio_config.get("freeze_map_to_odom_after_init", False)
         )
+        self.robot = GO2_CONFIG
+        self.poi_yaw_done_threshold_rad = _POI_YAW_DONE_THRESHOLD_RAD
         self.get_logger().info(
             f"Loaded {_VIO_CONFIG_FILE}: "
             f"freeze_map_to_odom_after_init={self.freeze_map_to_odom_after_init}"
@@ -295,6 +322,7 @@ class MapNode(Node):
 
         self._save_completed = False
         self.nav_target_timer = self.create_timer(0.5, self.nav_target_timer_callback)
+        self._yaw_align_state: dict | None = None
 
     def pois_callback(self, msg: String):
         self.get_logger().info("Received POIs from planner: " + msg.data)
@@ -307,9 +335,23 @@ class MapNode(Node):
             for index, key in enumerate(keys):
                 raw_poi = raw_pois[str(key)]
                 pois_dict[index] = np.array(raw_poi["position"])
+                position_frame = str(raw_poi.get("position_frame", "camera"))
+                if position_frame not in {"camera", "control_center"}:
+                    position_frame = "camera"
+                yaw_deg = raw_poi.get("yaw_deg")
+                if yaw_deg is not None:
+                    try:
+                        yaw_deg = float(yaw_deg)
+                        if not np.isfinite(yaw_deg):
+                            yaw_deg = None
+                    except (TypeError, ValueError):
+                        yaw_deg = None
                 poi_meta[index] = {
                     "id": raw_poi.get("id", key),
                     "name": raw_poi.get("name"),
+                    "position_frame": position_frame,
+                    "yaw_deg": yaw_deg,
+                    "skip_yaw_align": bool(raw_poi.get("skip_yaw_align", False)),
                 }
             self.pois = pois_dict
             self.poi_meta = poi_meta
@@ -317,6 +359,7 @@ class MapNode(Node):
             if not self.pois:
                 self.poi_index = -1
                 self.cached_nav_path_in_map = None
+                self._yaw_align_state = None
                 # Signal planning_node to clear target_pose so it stops publishing paths
                 dummy_pose = np.eye(4)
                 self.poi_change_pub.publish(np2msg(dummy_pose, self.get_clock().now().to_msg(), "world", "map"))
@@ -331,6 +374,7 @@ class MapNode(Node):
             self._speed_estimate = None
             self.cached_nav_path_in_map = None
             self.cached_nav_path_poi_index = -1
+            self._yaw_align_state = None
             self.get_logger().info(f"Parsed POIs: {self.pois}")
         except json.JSONDecodeError as e:
             self.get_logger().error(f"Failed to parse POIs JSON: {e}")
@@ -338,7 +382,8 @@ class MapNode(Node):
             self.poi_meta = {}
 
     def _nav_progress_payload(self, *, percent: float, path_remaining_m: float,
-                              path_total_m: float, estimated_remaining_s: float) -> dict:
+                              path_total_m: float, estimated_remaining_s: float,
+                              yaw_aligning: bool = False, yaw_error_deg: float | None = None) -> dict:
         meta = self.poi_meta.get(self.poi_index, {})
         return {
             "poi_index": self.poi_index,  # route index in the current command queue
@@ -348,7 +393,63 @@ class MapNode(Node):
             "path_remaining_m": path_remaining_m,
             "path_total_m": path_total_m,
             "estimated_remaining_s": estimated_remaining_s,
+            "yaw_aligning": yaw_aligning,
+            "yaw_error_deg": yaw_error_deg,
         }
+
+    def _control_center_pose_in_map(self, pose_in_map: np.ndarray) -> np.ndarray:
+        return camera_pose_to_control_center_pose(pose_in_map, self.robot)
+
+    def _current_nav_pose_in_map(self, pose_in_map: np.ndarray, position_frame: str) -> np.ndarray:
+        if position_frame == "control_center":
+            return self._control_center_pose_in_map(pose_in_map)
+        return pose_in_map
+
+    def _publish_target_pose_in_odom(self, pose_in_map: np.ndarray, target_position: np.ndarray, yaw_deg: float | None, position_frame: str, position_locked: bool = False):
+        T_from_map_to_odom = self.latest_odom_pose @ np.linalg.inv(pose_in_map)
+        yaw_rad = np.deg2rad(yaw_deg) if yaw_deg is not None else None
+        target_pose_in_map = pose_from_position_yaw(target_position, yaw_rad)
+        target_pose_in_odom = T_from_map_to_odom @ target_pose_in_map
+        target_msg = np2msg(target_pose_in_odom, self.get_clock().now().to_msg(), "world", "camera")
+        if yaw_rad is not None:
+            target_msg.twist.twist.angular.x = 1.0
+        if position_frame == "control_center":
+            target_msg.twist.twist.angular.y = 1.0
+        if position_locked:
+            target_msg.twist.twist.angular.z = 1.0
+        self.target_pose_pub.publish(target_msg)
+        self.tf_broadcaster.sendTransform(np2tf(T_from_map_to_odom, self.get_clock().now().to_msg(), "world", "map"))
+
+    def _clear_planning_target(self):
+        dummy_pose = np.eye(4)
+        self.poi_change_pub.publish(np2msg(dummy_pose, self.get_clock().now().to_msg(), "world", "map"))
+
+    def _start_yaw_align(self, *, poi: np.ndarray, yaw_deg: float, position_frame: str):
+        self.cached_nav_path_in_map = None
+        self.cached_nav_path_poi_index = -1
+        self._yaw_align_state = {
+            "poi_index": self.poi_index,
+            "deadline": time.time() + _POI_YAW_ALIGN_TIMEOUT_S,
+            "poi": poi.copy(),
+            "yaw_deg": float(yaw_deg),
+            "position_frame": position_frame,
+        }
+
+    def _complete_current_poi(self):
+        self.nav_progress_pub.publish(String(data=json.dumps(self._nav_progress_payload(
+            percent=100.0,
+            path_remaining_m=0.0,
+            path_total_m=round(self._leg_initial_length or 0.0, 2),
+            estimated_remaining_s=0.0,
+        ))))
+        self.poi_index += 1
+        self._leg_initial_length = None
+        self._leg_start_time = None
+        self._speed_estimate = None
+        self.cached_nav_path_in_map = None
+        self.cached_nav_path_poi_index = -1
+        self._yaw_align_state = None
+        self._clear_planning_target()
 
     def info_callback(self, msg:CameraInfo):
         if self.K is None:
@@ -659,27 +760,74 @@ class MapNode(Node):
 
         pose_in_map = np.linalg.inv(self.T_from_map_to_odom) @ self.latest_odom_pose
         self.current_pose_in_map_pub.publish(np2msg(pose_in_map, self.get_clock().now().to_msg(), "world", "map"))
+        control_center_pose_in_map = self._control_center_pose_in_map(pose_in_map)
+        current_yaw = yaw_from_matrix(control_center_pose_in_map[:3, :3])
+        now = time.time()
 
-        pos = pose_in_map[:3, 3]
+        if self._yaw_align_state is not None:
+            active_align = self._yaw_align_state
+            if active_align.get("poi_index") != self.poi_index:
+                self._yaw_align_state = None
+            else:
+                yaw_error_rad = wrap_angle_rad(np.deg2rad(float(active_align["yaw_deg"])) - current_yaw)
+                if abs(yaw_error_rad) <= self.poi_yaw_done_threshold_rad or now >= float(active_align["deadline"]):
+                    self._complete_current_poi()
+                else:
+                    active_position_frame = str(active_align.get("position_frame", "camera"))
+                    self.nav_progress_pub.publish(String(data=json.dumps(self._nav_progress_payload(
+                        percent=99.0,
+                        path_remaining_m=0.0,
+                        path_total_m=round(self._leg_initial_length or 0.0, 2),
+                        estimated_remaining_s=max(0.0, round(float(active_align["deadline"]) - now, 1)),
+                        yaw_aligning=True,
+                        yaw_error_deg=round(np.rad2deg(yaw_error_rad), 1),
+                    ))))
+                    self._publish_target_pose_in_odom(
+                        pose_in_map,
+                        active_align["poi"],
+                        active_align["yaw_deg"],
+                        active_position_frame,
+                        True,
+                    )
+                    return
 
         while self.poi_index < len(self.pois):
             poi = self.pois[self.poi_index]
+            meta = self.poi_meta.get(self.poi_index, {})
+            position_frame = str(meta.get("position_frame", "camera"))
+            nav_pose_in_map = self._current_nav_pose_in_map(pose_in_map, position_frame)
+            pos = nav_pose_in_map[:3, 3]
             diff_position_norm_xy = np.linalg.norm(poi[:2] - pos[:2])
             diff_position_norm_z = abs(poi[2] - pos[2])
             if diff_position_norm_xy < 0.3 and diff_position_norm_z < 2.0:
-                self.nav_progress_pub.publish(String(data=json.dumps(self._nav_progress_payload(
-                    percent=100.0,
-                    path_remaining_m=0.0,
-                    path_total_m=round(self._leg_initial_length or 0.0, 2),
-                    estimated_remaining_s=0.0,
-                ))))
-                self.poi_index += 1
-                self._leg_initial_length = None
-                self._leg_start_time = None
-                self._speed_estimate = None
-                self.cached_nav_path_in_map = None
-                self.cached_nav_path_poi_index = -1
-                self.poi_change_pub.publish(np2msg(np.eye(4), self.get_clock().now().to_msg(), "world", "map"))
+                yaw_deg = meta.get("yaw_deg")
+                skip_yaw_align = bool(meta.get("skip_yaw_align", False))
+                if yaw_deg is not None and not skip_yaw_align:
+                    yaw_error_rad = wrap_angle_rad(np.deg2rad(float(yaw_deg)) - current_yaw)
+                    if abs(yaw_error_rad) > self.poi_yaw_done_threshold_rad:
+                        if self._yaw_align_state is None or self._yaw_align_state.get("poi_index") != self.poi_index:
+                            self._start_yaw_align(
+                                poi=poi,
+                                yaw_deg=float(yaw_deg),
+                                position_frame=position_frame,
+                            )
+                        self.nav_progress_pub.publish(String(data=json.dumps(self._nav_progress_payload(
+                            percent=99.0,
+                            path_remaining_m=0.0,
+                            path_total_m=round(self._leg_initial_length or 0.0, 2),
+                            estimated_remaining_s=max(0.0, round(self._yaw_align_state["deadline"] - time.time(), 1)),
+                            yaw_aligning=True,
+                            yaw_error_deg=round(np.rad2deg(yaw_error_rad), 1),
+                        ))))
+                        self._publish_target_pose_in_odom(
+                            pose_in_map,
+                            poi,
+                            float(yaw_deg),
+                            position_frame,
+                            True,
+                        )
+                        return
+                self._complete_current_poi()
                 continue
             else:
                 break
@@ -692,6 +840,10 @@ class MapNode(Node):
             return
 
         poi = self.pois[self.poi_index]
+        meta = self.poi_meta.get(self.poi_index, {})
+        position_frame = str(meta.get("position_frame", "camera"))
+        nav_pose_in_map = self._current_nav_pose_in_map(pose_in_map, position_frame)
+        pos = nav_pose_in_map[:3, 3]
         needs_replan = (
             self.cached_nav_path_in_map is None
             or self.cached_nav_path_poi_index != self.poi_index
@@ -703,7 +855,7 @@ class MapNode(Node):
                 needs_replan = True
 
         if needs_replan:
-            paths = self.generate_nav_path_in_map(pose_in_map=pose_in_map, target_poi=poi)
+            paths = self.generate_nav_path_in_map(pose_in_map=nav_pose_in_map, target_poi=poi)
             if paths is not None:
                 self.cached_nav_path_in_map = paths
                 self.cached_nav_path_poi_index = self.poi_index
@@ -753,12 +905,7 @@ class MapNode(Node):
                 break
             start_point = paths[i]
 
-        T = self.latest_odom_pose @ np.linalg.inv(pose_in_map)
-        target_position_in_odom = T[:3, :3] @ target_position + T[:3, 3]
-        dummy_pose = np.eye(4)
-        dummy_pose[:3, 3] = target_position_in_odom
-        self.target_pose_pub.publish(np2msg(dummy_pose, self.get_clock().now().to_msg(), "world", "camera"))
-        self.tf_broadcaster.sendTransform(np2tf(T, self.get_clock().now().to_msg(), "world", "map"))
+        self._publish_target_pose_in_odom(pose_in_map, target_position, None, position_frame)
 
     def generate_nav_path_in_map(self, pose_in_map: np.ndarray, target_poi: np.ndarray) -> np.ndarray:
         dummy_poi_pose = np.eye(4)

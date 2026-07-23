@@ -521,6 +521,18 @@ class BackendNode(Ros2NodeManager):
             json.dump(self._default_vio_config(), f, indent=2)
             f.write('\n')
 
+    def _prepare_nav_poi_payload(self, poi: dict, route_index: int) -> dict:
+        payload_poi = dict(poi)
+        poi_id = payload_poi.get('id')
+        try:
+            poi_id = int(poi_id) if poi_id is not None else None
+        except (TypeError, ValueError):
+            poi_id = None
+        poi_name = payload_poi.get('name') if isinstance(payload_poi.get('name'), str) else None
+        if self._load_map_handoff_rule(route_index, poi_id=poi_id, poi_name=poi_name) is not None:
+            payload_poi['skip_yaw_align'] = True
+        return payload_poi
+
     def _set_active_map_link(self, map_name: str):
         import shutil
         root = self.tinynav_db_path
@@ -1851,7 +1863,7 @@ class BackendNode(Ros2NodeManager):
             self.get_logger().warn(f'POI {poi_id} not found in pois.json')
             return False
         # Re-index as "0" to match pub_pois.py convention expected by map_node
-        payload = {'0': pois[key]}
+        payload = {'0': self._prepare_nav_poi_payload(pois[key], 0)}
         self._cmd_pois_pub.publish(String(data=json.dumps(payload)))
         return True
 
@@ -1913,7 +1925,8 @@ class BackendNode(Ros2NodeManager):
                     if poi is None and poi_ref.isdigit():
                         poi = all_pois.get(poi_ref)
                 if poi is not None:
-                    payload[str(len(payload))] = poi
+                    route_index = len(payload)
+                    payload[str(route_index)] = self._prepare_nav_poi_payload(poi, route_index)
                 else:
                     self.get_logger().warn(f'POI {poi_ref!r} not found in active map')
             self._cmd_pois_pub.publish(String(data=json.dumps(payload)))

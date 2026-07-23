@@ -143,6 +143,8 @@ def map_preview_image(map_name: str):
 class MapPoiCreateRequest(BaseModel):
     name: str
     position: list[float]  # [x, y, z]
+    position_frame: str = 'control_center'
+    yaw_deg: float | None = None
 
 
 @router.post('/preview/{map_name}/pois')
@@ -150,6 +152,8 @@ def map_preview_create_poi(map_name: str, req: MapPoiCreateRequest):
     path = _resolve_map_path(map_name)
     if len(req.position) != 3:
         raise HTTPException(400, 'position must be [x, y, z]')
+    if req.position_frame not in {'camera', 'control_center'}:
+        raise HTTPException(400, 'position_frame must be "camera" or "control_center"')
     pois_file = os.path.join(path, 'pois.json')
     pois: dict = {}
     if os.path.exists(pois_file):
@@ -157,7 +161,13 @@ def map_preview_create_poi(map_name: str, req: MapPoiCreateRequest):
             pois = json.load(f)
     existing_ids = [int(k) for k in pois.keys()] if pois else []
     new_id = max(existing_ids) + 1 if existing_ids else 0
-    pois[str(new_id)] = {'id': new_id, 'name': req.name, 'position': req.position}
+    pois[str(new_id)] = {
+        'id': new_id,
+        'name': req.name,
+        'position': req.position,
+        'position_frame': req.position_frame,
+        'yaw_deg': req.yaw_deg,
+    }
     with open(pois_file, 'w') as f:
         json.dump(pois, f, indent=2)
     return pois[str(new_id)]
@@ -178,3 +188,4 @@ def map_preview_delete_poi(map_name: str, poi_id: int):
     with open(pois_file, 'w') as f:
         json.dump(pois, f, indent=2)
     return {'ok': True}
+

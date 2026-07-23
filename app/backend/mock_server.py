@@ -194,7 +194,13 @@ def list_pois():
 @app.post('/map/pois')
 def create_poi(req: dict):
     new_id = max((int(k) for k in _pois), default=-1) + 1
-    _pois[str(new_id)] = {'id': new_id, 'name': req['name'], 'position': req['position']}
+    _pois[str(new_id)] = {
+        'id': new_id,
+        'name': req['name'],
+        'position': req['position'],
+        'position_frame': req.get('position_frame', 'control_center'),
+        'yaw_deg': req.get('yaw_deg'),
+    }
     return _pois[str(new_id)]
 
 

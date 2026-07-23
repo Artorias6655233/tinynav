@@ -371,7 +371,24 @@ def _run_router_suite(client, node, map_path, bag_path):
         r = client.post('/map/pois', json={'name': 'Kitchen', 'position': [1.0, 2.0, 0.0]})
         assert r.status_code == 200
         assert r.json()['name'] == 'Kitchen'
+        assert r.json()['position_frame'] == 'control_center'
+        assert r.json()['yaw_deg'] is None
         assert len(client.get('/map/pois').json()['pois']) == 1
+
+    def test_poi_create_preserves_explicit_frame_and_yaw():
+        reset()
+        r = client.post(
+            '/map/pois',
+            json={
+                'name': 'CameraTarget',
+                'position': [1.0, 2.0, 0.0],
+                'position_frame': 'camera',
+                'yaw_deg': 90.0,
+            },
+        )
+        assert r.status_code == 200
+        assert r.json()['position_frame'] == 'camera'
+        assert r.json()['yaw_deg'] == 90.0
 
     def test_poi_delete():
         reset()
@@ -386,6 +403,13 @@ def _run_router_suite(client, node, map_path, bag_path):
     def test_poi_invalid_position():
         reset()
         assert client.post('/map/pois', json={'name': 'Bad', 'position': [1.0, 2.0]}).status_code == 400
+
+    def test_poi_invalid_position_frame():
+        reset()
+        assert client.post(
+            '/map/pois',
+            json={'name': 'Bad', 'position': [1.0, 2.0, 0.0], 'position_frame': 'body'},
+        ).status_code == 400
 
     def test_poi_unique_ids():
         reset()
@@ -478,3 +502,4 @@ if __name__ == '__main__':
 
     ok = _summary()
     sys.exit(0 if ok else 1)
+

@@ -22,7 +22,33 @@ import rclpy
 import os
 from math_utils import msg2np, matrix_to_quat
 from map_node import search_close_to_sdf_map, search_within_sdf_map
+from robot_geometry import GO2_CONFIG, camera_pose_to_control_center_pose
 from tool.video_db import VideoDB
+
+
+def _wrap_yaw_deg(yaw_deg: float) -> float:
+    return float((yaw_deg + 180.0) % 360.0 - 180.0)
+
+
+def _rotation_matrix_to_yaw_deg(rotation: np.ndarray) -> float:
+    return _wrap_yaw_deg(float(np.degrees(np.arctan2(rotation[1, 0], rotation[0, 0]))))
+
+
+def _wxyz_to_yaw_deg(wxyz: tuple[float, float, float, float]) -> float:
+    w, x, y, z = [float(v) for v in wxyz]
+    siny_cosp = 2.0 * (w * z + x * y)
+    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+    return _wrap_yaw_deg(float(np.degrees(np.arctan2(siny_cosp, cosy_cosp))))
+
+
+def _yaw_deg_to_wxyz(yaw_deg: float) -> tuple[float, float, float, float]:
+    yaw_rad = np.deg2rad(float(yaw_deg))
+    return (float(np.cos(yaw_rad / 2.0)), 0.0, 0.0, float(np.sin(yaw_rad / 2.0)))
+
+
+def _control_center_pose(pose: np.ndarray) -> np.ndarray:
+    return camera_pose_to_control_center_pose(pose, GO2_CONFIG)
+
 
 class SplatFile(TypedDict):
     centers: npt.NDArray[np.floating]
@@ -328,6 +354,7 @@ def create_poi_ui(
     sphere_handle: viser.SceneHandle,
     nav_state: dict | None = None,
     refresh_nav_markers=None,
+    editor_state: dict | None = None,
 ):
     with poi_list_container:
         with server.gui.add_folder(f"POI_{poi_index}") as poi_container:
@@ -342,6 +369,22 @@ def create_poi_ui(
                 "Position",
                 initial_value=poi_points[poi_index]['position'],
                 step=0.25,
+            )
+            initial_yaw_deg = float(poi_points[poi_index].get('yaw_deg', 0.0))
+            yaw_enabled = server.gui.add_checkbox(
+                "Enable Yaw",
+                initial_value='yaw_deg' in poi_points[poi_index],
+            )
+            yaw_slider = server.gui.add_slider(
+                "Yaw (deg)",
+                min=-180.0,
+                max=180.0,
+                step=1.0,
+                initial_value=_wrap_yaw_deg(initial_yaw_deg),
+            )
+            use_current_yaw_button = server.gui.add_button(
+                "Use Current Yaw",
+                color=(80, 180, 255),
             )
             scale = server.gui.add_slider(
                 "Scale", min=0.1, max=5.0, step=0.05, initial_value=0.1
@@ -381,12 +424,57 @@ def create_poi_ui(
     color_b_slider.on_update(update_color)
 
     # Add a transform gizmo attached to the sphere
-    gizmo = server.scene.add_transform_controls(f"/{poi_points[poi_index]['name']}_gizmo", position=poi_points[poi_index]['position'], wxyz=(1.0, 0.0, 0.0, 0.0))
+    gizmo = server.scene.add_transform_controls(
+        f"/{poi_points[poi_index]['name']}_gizmo",
+        position=poi_points[poi_index]['position'],
+        wxyz=_yaw_deg_to_wxyz(initial_yaw_deg),
+    )
+
+    def _sync_poi_yaw(yaw_deg: float, *, update_slider: bool = True, update_gizmo: bool = True) -> None:
+        yaw_deg = _wrap_yaw_deg(yaw_deg)
+        if yaw_enabled.value:
+            poi_points[poi_index]['yaw_deg'] = yaw_deg
+        else:
+            poi_points[poi_index].pop('yaw_deg', None)
+        if update_slider:
+            yaw_slider.value = yaw_deg
+        if update_gizmo:
+            gizmo.wxyz = _yaw_deg_to_wxyz(yaw_deg)
+
+    @yaw_enabled.on_update
+    def _(_) -> None:
+        if yaw_enabled.value:
+            _sync_poi_yaw(yaw_slider.value, update_slider=False)
+        else:
+            poi_points[poi_index].pop('yaw_deg', None)
+
+    @yaw_slider.on_update
+    def _(_) -> None:
+        _sync_poi_yaw(yaw_slider.value, update_slider=False)
+
+    @use_current_yaw_button.on_click
+    def _(_) -> None:
+        current_yaw_deg = None
+        if editor_state is not None:
+            current_yaw_deg = editor_state.get('current_pose_in_map_yaw_deg')
+            if current_yaw_deg is None:
+                current_yaw_deg = editor_state.get('current_odom_yaw_deg')
+        if current_yaw_deg is None:
+            print("Current yaw unavailable; wait for pose topics first.")
+            return
+        yaw_enabled.value = True
+        _sync_poi_yaw(float(current_yaw_deg))
+
     def on_gizmo_update(event):
         # Update sphere position when gizmo is dragged
         sphere_handle.position = event.target.position
         gui_vector3.value = event.target.position
         poi_points[poi_index]['position'] = np.asarray(event.target.position, dtype=np.float32)
+        poi_points[poi_index]['position_frame'] = 'control_center'
+        target_wxyz = getattr(event.target, 'wxyz', None)
+        if target_wxyz is not None:
+            yaw_enabled.value = True
+            _sync_poi_yaw(_wxyz_to_yaw_deg(target_wxyz), update_gizmo=False)
         if refresh_nav_markers is not None and nav_state is not None and (
             nav_state.get("start_poi_id") == poi_index or nav_state.get("goal_poi_id") == poi_index
         ):
@@ -399,6 +487,7 @@ def create_poi_ui(
         sphere_handle.position = new_pos
         gizmo.position = new_pos
         poi_points[poi_index]['position'] = new_pos
+        poi_points[poi_index]['position_frame'] = 'control_center'
         if refresh_nav_markers is not None and nav_state is not None and (
             nav_state.get("start_poi_id") == poi_index or nav_state.get("goal_poi_id") == poi_index
         ):
@@ -421,9 +510,10 @@ def create_poi_ui(
             refresh_nav_markers()
 
 class RelocalizationPose(Node):
-    def __init__(self, viser_server: viser.ViserServer):
+    def __init__(self, viser_server: viser.ViserServer, editor_state: dict | None = None):
         super().__init__('relocalization_pose')
         self.viser_server = viser_server
+        self.editor_state = editor_state if editor_state is not None else {}
         self.relocalization_pose_sub = self.create_subscription(Odometry, '/map/relocalization', self.relocalization_pose_callback, 10)
         self.global_plan_sub = self.create_subscription(nav_msgs.msg.Path, '/mapping/global_plan', self.global_plan_callback, 10)
         self.planning_path_sub = self.create_subscription(nav_msgs.msg.Path, '/planning/trajectory_path', self.planning_path_callback, 10)
@@ -490,8 +580,11 @@ class RelocalizationPose(Node):
 
     def odometry_callback(self, msg:Odometry):
         odom, _ = msg2np(msg)
-        xyzw = matrix_to_quat(odom[:3, :3])
-        position = odom[:3, 3]
+        odom_control = _control_center_pose(odom)
+        xyzw = matrix_to_quat(odom_control[:3, :3])
+        position = odom_control[:3, 3]
+        self.editor_state['current_odom_yaw_deg'] = _rotation_matrix_to_yaw_deg(odom_control[:3, :3])
+        self.editor_state['current_odom_position'] = position.copy()
         gizmo = self.viser_server.scene.add_transform_controls("/odom_gizmo", position=position, wxyz=(xyzw[3], xyzw[0], xyzw[1], xyzw[2]))
 
     def target_pose_callback(self, msg:Odometry):
@@ -502,8 +595,11 @@ class RelocalizationPose(Node):
 
     def current_pose_in_map_callback(self, msg: Odometry):
         odom, _ = msg2np(msg)
-        xyzw = matrix_to_quat(odom[:3, :3])
-        position = odom[:3, 3]
+        odom_control = _control_center_pose(odom)
+        xyzw = matrix_to_quat(odom_control[:3, :3])
+        position = odom_control[:3, 3]
+        self.editor_state['current_pose_in_map_yaw_deg'] = _rotation_matrix_to_yaw_deg(odom_control[:3, :3])
+        self.editor_state['current_pose_in_map_position'] = position.copy()
         self.viser_server.scene.add_transform_controls(
             "/current_pose_in_map_gizmo",
             position=position,
@@ -528,6 +624,12 @@ def main(
         "goal_marker": None,
         "path_handle": None,
         "poi_role_labels": {},
+    }
+    editor_state = {
+        "current_odom_yaw_deg": None,
+        "current_pose_in_map_yaw_deg": None,
+        "current_odom_position": None,
+        "current_pose_in_map_position": None,
     }
 
     def refresh_poi_role_labels() -> None:
@@ -563,6 +665,13 @@ def main(
             poi_points = {int(k): v for k, v in poi_points.items()}
             for k, v in poi_points.items():
                 v['position'] = np.array(v['position'])
+                if v.get('position_frame') not in {'camera', 'control_center'}:
+                    v['position_frame'] = 'camera'
+                if 'yaw_deg' in v:
+                    try:
+                        v['yaw_deg'] = _wrap_yaw_deg(float(v['yaw_deg']))
+                    except (TypeError, ValueError):
+                        v.pop('yaw_deg', None)
             poi_id_counter = max(map(lambda x: int(x), poi_points.keys())) + 1
        
     
@@ -573,8 +682,14 @@ def main(
 
         @add_save_poi_button.on_click
         def _(_) -> None:
+            poi_points_to_save = {}
+            for poi_id, poi in poi_points.items():
+                poi_payload = dict(poi)
+                if poi_payload.get('position_frame') not in {'camera', 'control_center'}:
+                    poi_payload['position_frame'] = 'camera'
+                poi_points_to_save[poi_id] = poi_payload
             with open(f"{tinynav_map_path}/pois.json", "w") as f:
-                json.dump(poi_points, f, indent=2, default=lambda x: x.tolist() if isinstance(x, np.ndarray) else x)
+                json.dump(poi_points_to_save, f, indent=2, default=lambda x: x.tolist() if isinstance(x, np.ndarray) else x)
 
 
         poi_list_container = server.gui.add_folder("POI List")
@@ -585,7 +700,7 @@ def main(
                 color=(np.random.randint(0, 255), np.random.randint(0, 255), np.random.randint(0, 255)),
                 position=poi_point['position']
             )
-            create_poi_ui(server, poi_list_container, int(poi_id), poi_points, sphere_handle, nav_state, refresh_nav_markers)
+            create_poi_ui(server, poi_list_container, int(poi_id), poi_points, sphere_handle, nav_state, refresh_nav_markers, editor_state)
 
         @add_poi_button.on_click
         def _(_) -> None:
@@ -595,7 +710,12 @@ def main(
             poi_id = poi_id_counter
             poi_id_counter += 1
             poi_name = f"POI_{poi_id}"
-            if len(poi_points) > 0:
+            current_position = editor_state.get('current_pose_in_map_position')
+            if current_position is None:
+                current_position = editor_state.get('current_odom_position')
+            if current_position is not None:
+                poi_position = np.asarray(current_position, dtype=np.float32).copy()
+            elif len(poi_points) > 0:
                 previous_poi_id = max(poi_points.keys())
                 previous_position = np.asarray(poi_points[previous_poi_id]['position'], dtype=float)
                 poi_position = previous_position + np.array([0.3, 0.0, 0.0])
@@ -606,6 +726,7 @@ def main(
                 'id': poi_id,
                 'name': poi_name,
                 'position': poi_position,
+                'position_frame': 'control_center',
             }
             sphere_handle = server.scene.add_icosphere(
                 f"/{poi_name}",
@@ -613,7 +734,7 @@ def main(
                 color=(np.random.randint(0, 255), np.random.randint(0, 255), np.random.randint(0, 255)),
                 position=poi_points[poi_id]['position']
             )
-            create_poi_ui(server, poi_list_container, poi_id, poi_points, sphere_handle, nav_state, refresh_nav_markers)
+            create_poi_ui(server, poi_list_container, poi_id, poi_points, sphere_handle, nav_state, refresh_nav_markers, editor_state)
     
     # Load and visualize occupancy grid as 2D XY projection (same as build_map_node).
     occupancy_grid_path = tinynav_map_path / "occupancy_grid.npy"
@@ -1049,7 +1170,7 @@ def main(
         print(f"Warning: Neither {splat_path} nor {pointcloud_path} exists. No 3D representation loaded.")
 
     rclpy.init()
-    relocalization_pose_node = RelocalizationPose(server)
+    relocalization_pose_node = RelocalizationPose(server, editor_state)
     try:
         rclpy.spin(relocalization_pose_node)
         relocalization_pose_node.destroy_node()
@@ -1069,3 +1190,4 @@ def main(
 
 if __name__ == "__main__":
     tyro.cli(main)
+

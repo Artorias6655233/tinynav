@@ -4,8 +4,7 @@ from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelSubscri
 from unitree_sdk2py.idl.geometry_msgs.msg.dds_ import Twist_
 from unitree_sdk2py.idl.std_msgs.msg.dds_ import String_
 from unitree_sdk2py.idl.unitree_go.msg.dds_ import LowState_
-from unitree_sdk2py.b2.sport.sport_client import SportClient as SportClientB2
-# from unitree_sdk2py.go2.sport.sport_client import SportClient as SportClientB2
+from unitree_sdk2py.go2.sport.sport_client import SportClient
 from unitree_sdk2py.go2.obstacles_avoid.obstacles_avoid_client import ObstaclesAvoidClient
 from std_msgs.msg import Float32, String
 from enum import Enum
@@ -27,8 +26,9 @@ class Ros2UnitreeManagerNode(Node):
 
     def __init__(self, networkInterface: str = "enP8p1s0"):
         super().__init__('ros2_unitree_manager')
+        self.logger = logging.getLogger(__name__)
         self.channel = self._init_channel_with_retry(networkInterface)
-        self.sport_client = SportClientB2()
+        self.sport_client = SportClient()
         self.obstacles_avoid_client = ObstaclesAvoidClient()
         self.sport_client.SetTimeout(10.0)
         self.sport_client.Init()
@@ -36,12 +36,11 @@ class Ros2UnitreeManagerNode(Node):
         self.obstacles_avoid_client.SetTimeout(3.0)
         self.obstacles_avoid_client.Init()
         self.obstacles_avoid_client.SwitchSet(False)
-        # self.sport_client.SwitchGait(1)
-        self.sport_client.SwitchGait(1)
+        self._set_default_gait()
         self._robot_status = RobotStatus.SITTING
         self.battery = 0.0
         self.last_twist_time = None
-        self.logger = logging.getLogger(__name__)
+        self._motion_active = False
 
         self.twist_subscriber = ChannelSubscriber("rt/cmd_vel", Twist_)
         self.twist_subscriber.Init(self.TwistMessageHandler, 10)
@@ -56,6 +55,10 @@ class Ros2UnitreeManagerNode(Node):
         self.publisher_robot_status = self.create_publisher(String, '/robot_status', 10)
 
         self._status_timer = self.create_timer(1.0, self._publish_robot_status)
+
+    def _set_default_gait(self):
+        code = self.sport_client.ClassicWalk(True)
+        self.logger.info(f"ClassicWalk enabled, return_code={code}")
 
     def _init_channel_with_retry(self, networkInterface: str, max_retries: int = None):
         """Retry ChannelFactoryInitialize in case the network interface isn't ready yet."""
@@ -78,12 +81,17 @@ class Ros2UnitreeManagerNode(Node):
             time_interval = current_time - self.last_twist_time
             self.logger.debug(f"cmd_vel callback time interval: {time_interval*1000:.2f} ms")
         self.last_twist_time = current_time
-        
-        if  (msg.linear.x != 0 or msg.linear.y != 0 or msg.angular.z != 0):
+
+        moving = (msg.linear.x != 0 or msg.linear.y != 0 or msg.angular.z != 0)
+        if moving:
+            if not self._motion_active:
+                self._set_default_gait()
+                self._motion_active = True
             self.logger.debug(f"Moving with velocity: {msg.linear.x}, {msg.linear.y}, {msg.angular.z}")
             self.sport_client.Move(msg.linear.x, msg.linear.y, msg.angular.z)
         else:
-            self.sport_client.StopMove()
+            self._motion_active = False
+            self.sport_client.Move(0.0, 0.0, 0.0)
         time.sleep(0.02)
 
     def ActionMessageHandler(self, msg: String_):
@@ -92,11 +100,14 @@ class Ros2UnitreeManagerNode(Node):
             if action_key == "sit":
                 self.logger.info("Sitting")
                 self.sport_client.StandDown()
+                self._motion_active = False
                 self._robot_status = RobotStatus.SITTING
             elif action_key == "stand":
                 self.logger.info("Standing")
                 self.sport_client.StandUp()
                 self.sport_client.BalanceStand()
+                self._set_default_gait()
+                self._motion_active = False
                 self._robot_status = RobotStatus.STANDUP
     
     def _publish_robot_status(self):

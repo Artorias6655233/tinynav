@@ -41,7 +41,7 @@ class CmdVelControlNode(Node):
         self.path_stale_stop_factor = 5.0
         self.max_linear_acc = 0.6   # m/s^2
         self.max_angular_acc = 0.8  # rad/s^2
-        self.max_angular_speed = 1.5  # rad/s
+        self.max_angular_speed = 2.0  # rad/s
         self.planner_dt = 0.1       # trajectory dt in planning_node
         # planning_node publishes path with for j in range(..., step=10), so points are ~1.0 s apart.
         self.path_pose_stride = 10
@@ -79,13 +79,17 @@ class CmdVelControlNode(Node):
         self.last_path_update_time = None
         self._paused = False
         self._nav_active = False
+        self._final_yaw_align_active = False
         _latched_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.create_subscription(Bool, '/nav/paused', self._on_paused, _latched_qos)
         self.create_subscription(Bool, '/nav/active', self._on_nav_active, _latched_qos)
+        self.create_subscription(Bool, '/planning/final_yaw_align_active', self._on_final_yaw_align_active, _latched_qos)
         self.cmd_timer = self.create_timer(1.0 / self.cmd_rate_hz, self.cmd_timer_callback)
 
     def _on_paused(self, msg: Bool):
         self._paused = msg.data
+        if self._paused:
+            self._final_yaw_align_active = False
         if not self._paused:
             # Reset prev_cmd so resume starts from zero cleanly
             self.prev_cmd = Twist()
@@ -97,6 +101,7 @@ class CmdVelControlNode(Node):
         was_active = self._nav_active
         self._nav_active = bool(msg.data)
         if was_active and not self._nav_active:
+            self._final_yaw_align_active = False
             self.latest_cmd = Twist()
             self.prev_cmd = Twist()
             self._linear_engaged = False
@@ -106,6 +111,11 @@ class CmdVelControlNode(Node):
             # Send one stop when navigation is deactivated, then stay silent so
             # manual teleop can own /cmd_vel without being overwritten by zeros.
             self.cmd_pub.publish(Twist())
+
+    def _on_final_yaw_align_active(self, msg: Bool):
+        self._final_yaw_align_active = bool(msg.data)
+        if self._final_yaw_align_active:
+            self._reset_rotate_state()
 
     def pose_callback(self, msg):
         self.pose = msg
@@ -145,7 +155,8 @@ class CmdVelControlNode(Node):
             target_cmd.angular.z = 0.0
         elif age > stale_slow_s:
             target_cmd.linear.x *= 0.3
-            target_cmd.angular.z *= 0.5
+            if not self._final_yaw_align_active:
+                target_cmd.angular.z *= 0.5
 
         out = Twist()
         out.linear.y = 0.0
@@ -269,23 +280,28 @@ class CmdVelControlNode(Node):
         # force an in-place turn. Skip explicit backward segments because reverse
         # naturally has heading_err close to +/-pi.
         rotate_threshold = self.rotate_first_exit_threshold if self._rotate_first_engaged else self.rotate_first_enter_threshold
-        force_rotate = (not is_backward_segment) and abs(turn_err) > self.force_turn_heading_threshold
-        rotate_first = vx > 0.0 and abs(turn_err) > rotate_threshold
-        if force_rotate or rotate_first:
-            sign_source = turn_err
-            if abs(sign_source) < 1e-3:
-                sign_source = vyaw
-            if abs(sign_source) < 1e-3:
-                sign_source = self.prev_cmd.angular.z
-            if (not self._rotate_first_engaged) or self._rotate_sign == 0.0:
-                self._rotate_sign = float(np.sign(sign_source)) if abs(sign_source) >= 1e-3 else 1.0
-            turn_gain = 1.0 if force_rotate else 1.6
-            turn_limit = self.max_angular_speed if force_rotate else 1.0
+        if self._final_yaw_align_active:
             vx = 0.0
-            vyaw = float(self._rotate_sign * np.clip(turn_gain * abs(turn_err), 0.0, turn_limit))
-            self._rotate_first_engaged = True
-        else:
+            vyaw = float(np.clip(vyaw, -self.max_angular_speed, self.max_angular_speed))
             self._reset_rotate_state()
+        else:
+            force_rotate = (not is_backward_segment) and abs(turn_err) > self.force_turn_heading_threshold
+            rotate_first = vx > 0.0 and abs(turn_err) > rotate_threshold
+            if force_rotate or rotate_first:
+                sign_source = turn_err
+                if abs(sign_source) < 1e-3:
+                    sign_source = vyaw
+                if abs(sign_source) < 1e-3:
+                    sign_source = self.prev_cmd.angular.z
+                if (not self._rotate_first_engaged) or self._rotate_sign == 0.0:
+                    self._rotate_sign = float(np.sign(sign_source)) if abs(sign_source) >= 1e-3 else 1.0
+                turn_gain = 1.0 if force_rotate else 1.6
+                turn_limit = self.max_angular_speed if force_rotate else 1.0
+                vx = 0.0
+                vyaw = float(self._rotate_sign * np.clip(turn_gain * abs(turn_err), 0.0, turn_limit))
+                self._rotate_first_engaged = True
+            else:
+                self._reset_rotate_state()
 
         vyaw = float(np.clip(vyaw, -self.max_angular_speed, self.max_angular_speed))
 
