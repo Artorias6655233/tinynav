@@ -1390,7 +1390,7 @@ class BackendNode(Ros2NodeManager):
         angular_speed = 0.6  # rad/s
         cmd_rate_hz = 10.0
         yaw_tolerance = math.radians(2.0)
-        step_deg = 20.0
+        step_deg = 10.0
         step_rad = math.radians(step_deg)
         stop = self._loc_assist_stop_event
 
