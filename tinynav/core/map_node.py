@@ -941,6 +941,13 @@ class MapNode(Node):
             return None 
         sdf_start_path = search_close_to_sdf_map(start_idx, self.sdf_map, self.occupancy_map, 0.2)
         sdf_goal_path = search_close_to_sdf_map(poi_goal_idx, self.sdf_map, self.occupancy_map, 0.2)
+        if len(sdf_start_path) == 0 or len(sdf_goal_path) == 0:
+            self.get_logger().warning(
+                "Failed to connect start/goal to navigable SDF region: "
+                f"start_idx={tuple(start_idx)}, goal_idx={tuple(poi_goal_idx)}, "
+                f"start_path={len(sdf_start_path)}, goal_path={len(sdf_goal_path)}"
+            )
+            return None
 
         sdf_start_sdf = sdf_start_path[-1]
         sdf_goal_sdf = sdf_goal_path[-1]

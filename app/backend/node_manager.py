@@ -1079,6 +1079,7 @@ class BackendNode(Ros2NodeManager):
         return None
 
     def get_status(self) -> dict:
+        self._ensure_nav_process_health()
         with self._lock:
             raw = self.state
             pct = self.mapping_percent
@@ -1142,6 +1143,46 @@ class BackendNode(Ros2NodeManager):
                     proc.kill()
                 except Exception:
                     pass
+
+    def _ensure_nav_process_health(self) -> bool:
+        with self._lock:
+            nav_running = self._nav_nodes_running
+            loc_assist = self._loc_assist_enabled
+            map_proc = self._map_node_proc
+            cmd_vel_proc = self._cmd_vel_proc
+            raw_state = self.state
+
+        if not nav_running:
+            return False
+
+        dead = []
+        if map_proc is None or map_proc.poll() is not None:
+            dead.append('map_node')
+        if not loc_assist and (cmd_vel_proc is None or cmd_vel_proc.poll() is not None):
+            dead.append('cmd_vel_control')
+
+        if not dead:
+            return True
+
+        self.get_logger().error(
+            f'Navigation process health check failed; dead={dead}, forcing nav state reset'
+        )
+        with self._lock:
+            self._nav_nodes_running = False
+            self._localized = False
+            self._map_pose = None
+            self._global_path = []
+            self._nav_target_pose = None
+            self._nav_paused = False
+            if 'map_node' in dead:
+                self._map_node_proc = None
+            if 'cmd_vel_control' in dead:
+                self._cmd_vel_proc = None
+            if raw_state == 'navigation':
+                self.state = 'idle'
+        self._set_nav_active(False)
+        self._pub_state()
+        return False
 
     def _make_log(self, name: str):
         """Open a timestamped log file under tinynav_db/logs/. Safe to close in parent
@@ -1890,6 +1931,7 @@ class BackendNode(Ros2NodeManager):
         Items may be integer POI IDs or POI names. The payload is re-indexed as
         a dense queue while preserving each POI's original id/name metadata.
         """
+        self._ensure_nav_process_health()
         with self._lock:
             self._active_nav_poi_ids = list(poi_ids)
             self._nav_progress = None
@@ -1941,6 +1983,7 @@ class BackendNode(Ros2NodeManager):
             self._start('navigation')
 
     def cmd_nav_start(self, poi_id: str | None = None):
+        self._ensure_nav_process_health()
         if poi_id is not None:
             poi_int = int(poi_id)
             with self._lock:
@@ -1961,6 +2004,7 @@ class BackendNode(Ros2NodeManager):
             self._start('navigation')
 
     def cmd_nav_cancel(self):
+        self._ensure_nav_process_health()
         if self.state != 'navigation':
             return
         with self._lock:
