@@ -1399,7 +1399,7 @@ class BackendNode(Ros2NodeManager):
             return
 
         turn_index = 1  # 1, 2, 3, 4, ...
-        direction = 1   # +1 = CW, -1 = CCW
+        direction = -1   # +1 = CW, -1 = CCW
 
         while not stop.is_set():
             # Turn relative to the current odom yaw. Positive angular.z is CCW,
