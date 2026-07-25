@@ -145,6 +145,10 @@ class PerceptionNode(Node):
         self.last_processed_timestamp = 0.0
         self.imu_measurements_lock = threading.Lock()
         self.stopped = False
+        # Quick validation trim: small publish-side yaw correction for the
+        # visual odometry output, tuned from straight-line Go2 field tests.
+        self.visual_yaw_trim_rad = -0.0035
+        self.visual_yaw_trim_anchor = None
         self.stereo_queue = Queue(maxsize=1)
         self.stereo_worker = threading.Thread(target=self._process_stereo_worker, daemon=True)
         self.stereo_worker.start()
@@ -272,6 +276,25 @@ class PerceptionNode(Node):
         self.input_aligner_seen_stereo = True
         if self.input_aligner_seen_imu:
             self.input_aligner.dispatchMessages()
+
+    def _apply_visual_yaw_trim(self, T: np.ndarray) -> np.ndarray:
+        if abs(self.visual_yaw_trim_rad) < 1e-9:
+            return T
+        if self.visual_yaw_trim_anchor is None:
+            self.visual_yaw_trim_anchor = T[:3, 3].copy()
+            return T
+        c = float(np.cos(self.visual_yaw_trim_rad))
+        s = float(np.sin(self.visual_yaw_trim_rad))
+        R_trim = np.array([
+            [c, -s, 0.0],
+            [s,  c, 0.0],
+            [0.0, 0.0, 1.0],
+        ], dtype=np.float64)
+        T_trimmed = np.array(T, copy=True)
+        T_trimmed[:3, :3] = R_trim @ T[:3, :3]
+        anchor = self.visual_yaw_trim_anchor
+        T_trimmed[:3, 3] = anchor + R_trim @ (T[:3, 3] - anchor)
+        return T_trimmed
 
     async def process(self, left_msg, right_msg):
         if self.K is None or self.T_body_last is None:
@@ -588,15 +611,24 @@ class PerceptionNode(Node):
         with Timer(name="[Publish Odometry]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
             self.T_body_last = result.atPose3(X(len(self.keyframe_queue) - 1)).matrix()
             self.V_last = result.atVector(V(len(self.keyframe_queue) - 1))
+            T_pub = self._apply_visual_yaw_trim(self.T_body_last)
             # publish odometry
-            self.odom_pub.publish(np2msg(self.T_body_last, left_msg.header.stamp, "world", "camera", self.V_last))
+            self.odom_pub.publish(np2msg(T_pub, left_msg.header.stamp, "world", "camera", self.V_last))
             # publish TF
-            self.tf_broadcaster.sendTransform(np2tf(self.T_body_last, left_msg.header.stamp, "world", "camera"))
+            self.tf_broadcaster.sendTransform(np2tf(T_pub, left_msg.header.stamp, "world", "camera"))
 
             last_keyframe = self.keyframe_queue[-2]
             current_keyframe = self.keyframe_queue[-1]
             if keyframe_check(last_keyframe.pose, current_keyframe.pose) or current_keyframe.timestamp - last_keyframe.timestamp > 3.0:
-                self.keyframe_pose_pub.publish(np2msg(current_keyframe.pose, left_msg.header.stamp, "world", "camera", current_keyframe.velocity))
+                self.keyframe_pose_pub.publish(
+                    np2msg(
+                        self._apply_visual_yaw_trim(current_keyframe.pose),
+                        left_msg.header.stamp,
+                        "world",
+                        "camera",
+                        current_keyframe.velocity,
+                    )
+                )
                 self.keyframe_image_pub.publish(left_msg)
                 self.keyframe_depth_pub.publish(depth_msg)
             else:
@@ -637,3 +669,4 @@ def main(args=None):
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)
     main()
+
