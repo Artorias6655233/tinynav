@@ -50,6 +50,17 @@ def _control_center_pose(pose: np.ndarray) -> np.ndarray:
     return camera_pose_to_control_center_pose(pose, GO2_CONFIG)
 
 
+def _poi_display_name(poi_index: int, poi_points: dict) -> str:
+    raw_name = str(poi_points[poi_index].get("name", "")).strip()
+    return raw_name if raw_name else f"POI_{poi_index}"
+
+
+def _poi_label_position(position: np.ndarray) -> np.ndarray:
+    pos = np.asarray(position, dtype=np.float32).copy()
+    pos[2] += 0.18
+    return pos
+
+
 class SplatFile(TypedDict):
     centers: npt.NDArray[np.floating]
     rgbs: npt.NDArray[np.floating]
@@ -352,12 +363,17 @@ def create_poi_ui(
     poi_index: int,
     poi_points: dict,
     sphere_handle: viser.SceneHandle,
+    label_handle: viser.SceneHandle,
     nav_state: dict | None = None,
     refresh_nav_markers=None,
     editor_state: dict | None = None,
 ):
     with poi_list_container:
         with server.gui.add_folder(f"POI_{poi_index}") as poi_container:
+            name_input = server.gui.add_text(
+                "Name",
+                initial_value=_poi_display_name(poi_index, poi_points),
+            )
             role_label = None
             if nav_state is not None:
                 role_label = server.gui.add_text(
@@ -423,6 +439,16 @@ def create_poi_ui(
     color_g_slider.on_update(update_color)
     color_b_slider.on_update(update_color)
 
+    @name_input.on_update
+    def _(_) -> None:
+        name = str(name_input.value).strip()
+        if not name:
+            name = f"POI_{poi_index}"
+        poi_points[poi_index]["name"] = name
+        if name_input.value != name:
+            name_input.value = name
+        label_handle.text = name
+
     # Add a transform gizmo attached to the sphere
     gizmo = server.scene.add_transform_controls(
         f"/{poi_points[poi_index]['name']}_gizmo",
@@ -468,6 +494,7 @@ def create_poi_ui(
     def on_gizmo_update(event):
         # Update sphere position when gizmo is dragged
         sphere_handle.position = event.target.position
+        label_handle.position = _poi_label_position(event.target.position)
         gui_vector3.value = event.target.position
         poi_points[poi_index]['position'] = np.asarray(event.target.position, dtype=np.float32)
         poi_points[poi_index]['position_frame'] = 'control_center'
@@ -485,6 +512,7 @@ def create_poi_ui(
     def on_vector3_update(event):
         new_pos = np.asarray(gui_vector3.value, dtype=np.float32)
         sphere_handle.position = new_pos
+        label_handle.position = _poi_label_position(new_pos)
         gizmo.position = new_pos
         poi_points[poi_index]['position'] = new_pos
         poi_points[poi_index]['position_frame'] = 'control_center'
@@ -505,6 +533,7 @@ def create_poi_ui(
             nav_state.setdefault("poi_role_labels", {}).pop(poi_index, None)
         poi_container.remove()
         sphere_handle.remove()
+        label_handle.remove()
         gizmo.remove()
         if refresh_nav_markers is not None:
             refresh_nav_markers()
@@ -700,7 +729,12 @@ def main(
                 color=(np.random.randint(0, 255), np.random.randint(0, 255), np.random.randint(0, 255)),
                 position=poi_point['position']
             )
-            create_poi_ui(server, poi_list_container, int(poi_id), poi_points, sphere_handle, nav_state, refresh_nav_markers, editor_state)
+            label_handle = server.scene.add_label(
+                f"/poi_labels/{poi_id}",
+                text=_poi_display_name(int(poi_id), poi_points),
+                position=_poi_label_position(poi_point['position']),
+            )
+            create_poi_ui(server, poi_list_container, int(poi_id), poi_points, sphere_handle, label_handle, nav_state, refresh_nav_markers, editor_state)
 
         @add_poi_button.on_click
         def _(_) -> None:
@@ -734,7 +768,12 @@ def main(
                 color=(np.random.randint(0, 255), np.random.randint(0, 255), np.random.randint(0, 255)),
                 position=poi_points[poi_id]['position']
             )
-            create_poi_ui(server, poi_list_container, poi_id, poi_points, sphere_handle, nav_state, refresh_nav_markers, editor_state)
+            label_handle = server.scene.add_label(
+                f"/poi_labels/{poi_id}",
+                text=poi_name,
+                position=_poi_label_position(poi_points[poi_id]['position']),
+            )
+            create_poi_ui(server, poi_list_container, poi_id, poi_points, sphere_handle, label_handle, nav_state, refresh_nav_markers, editor_state)
     
     # Load and visualize occupancy grid as 2D XY projection (same as build_map_node).
     occupancy_grid_path = tinynav_map_path / "occupancy_grid.npy"
