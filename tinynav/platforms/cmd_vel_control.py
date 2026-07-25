@@ -217,7 +217,11 @@ class CmdVelControlNode(Node):
         else:
             self._angular_engaged = False
 
-        if out.linear.x > 0.0 and not self._final_yaw_align_active:
+        if (
+            self._nav_active
+            and out.linear.x >= self.min_effective_linear_speed
+            and not self._final_yaw_align_active
+        ):
             out.angular.z = float(np.clip(out.angular.z + self.forward_yaw_bias, -self.max_angular_speed, self.max_angular_speed))
 
         self.cmd_pub.publish(out)

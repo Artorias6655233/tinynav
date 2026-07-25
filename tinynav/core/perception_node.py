@@ -15,8 +15,8 @@ from tinynav.core.models_trt import LightGlueTRT, SuperPointTRT, StereoEngineTRT
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from sensor_msgs.msg import Image, Imu, CameraInfo
-from std_msgs.msg import String
-from rclpy.qos import QoSProfile, ReliabilityPolicy
+from std_msgs.msg import Bool, String
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.duration import Duration
 from tinynav.core.math_utils import rot_from_two_vector, np2msg, np2tf, estimate_pose
 from tinynav.core.math_utils import uf_init, uf_union, uf_all_sets_list
@@ -140,6 +140,8 @@ class PerceptionNode(Node):
         self.keyframe_image_pub = self.create_publisher(Image, "/slam/keyframe_image", 10)
         self.keyframe_depth_pub = self.create_publisher(Image, "/slam/keyframe_depth", 10)
         self.stats_pub = self.create_publisher(String, "/slam/data", 10)
+        _latched_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.create_subscription(Bool, "/nav/active", self._on_nav_active, _latched_qos)
 
         self.accel_readings = []
         self.last_processed_timestamp = 0.0
@@ -147,8 +149,11 @@ class PerceptionNode(Node):
         self.stopped = False
         # Quick validation trim: small publish-side yaw correction for the
         # visual odometry output, tuned from straight-line Go2 field tests.
-        self.visual_yaw_trim_rad = -0.0035
+        # self.visual_yaw_trim_rad = -0.0035
+        self.visual_yaw_trim_rad = 0.0
+        self.visual_yaw_trim_min_linear_speed = 0.2
         self.visual_yaw_trim_anchor = None
+        self._nav_active = False
         self.stereo_queue = Queue(maxsize=1)
         self.stereo_worker = threading.Thread(target=self._process_stereo_worker, daemon=True)
         self.stereo_worker.start()
@@ -277,8 +282,19 @@ class PerceptionNode(Node):
         if self.input_aligner_seen_imu:
             self.input_aligner.dispatchMessages()
 
-    def _apply_visual_yaw_trim(self, T: np.ndarray) -> np.ndarray:
-        if abs(self.visual_yaw_trim_rad) < 1e-9:
+    def _on_nav_active(self, msg: Bool):
+        was_active = self._nav_active
+        self._nav_active = bool(msg.data)
+        if was_active and not self._nav_active:
+            self.visual_yaw_trim_anchor = None
+
+    def _apply_visual_yaw_trim(self, T: np.ndarray, velocity: np.ndarray) -> np.ndarray:
+        planar_speed = float(np.linalg.norm(velocity[:2])) if velocity is not None else 0.0
+        if (
+            abs(self.visual_yaw_trim_rad) < 1e-9
+            or not self._nav_active
+            or planar_speed < self.visual_yaw_trim_min_linear_speed
+        ):
             return T
         if self.visual_yaw_trim_anchor is None:
             self.visual_yaw_trim_anchor = T[:3, 3].copy()
@@ -611,7 +627,7 @@ class PerceptionNode(Node):
         with Timer(name="[Publish Odometry]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
             self.T_body_last = result.atPose3(X(len(self.keyframe_queue) - 1)).matrix()
             self.V_last = result.atVector(V(len(self.keyframe_queue) - 1))
-            T_pub = self._apply_visual_yaw_trim(self.T_body_last)
+            T_pub = self._apply_visual_yaw_trim(self.T_body_last, self.V_last)
             # publish odometry
             self.odom_pub.publish(np2msg(T_pub, left_msg.header.stamp, "world", "camera", self.V_last))
             # publish TF
@@ -622,7 +638,7 @@ class PerceptionNode(Node):
             if keyframe_check(last_keyframe.pose, current_keyframe.pose) or current_keyframe.timestamp - last_keyframe.timestamp > 3.0:
                 self.keyframe_pose_pub.publish(
                     np2msg(
-                        self._apply_visual_yaw_trim(current_keyframe.pose),
+                        self._apply_visual_yaw_trim(current_keyframe.pose, current_keyframe.velocity),
                         left_msg.header.stamp,
                         "world",
                         "camera",
