@@ -51,6 +51,9 @@ class CmdVelControlNode(Node):
         # Static-friction compensation: very small vx often cannot move the robot.
         self.min_effective_linear_speed = 0.2
         self.min_effective_angular_speed = 0.1
+        # Go2 hardware trim: the robot tends to drift left while walking, so add a
+        # small right-turn bias during forward navigation without polluting planner output.
+        self.forward_yaw_bias = -0.0143
         # Hysteresis: once moving, stay engaged until the target drops below this
         # (lower) threshold, instead of re-testing against min_effective_* every
         # cycle. Avoids bang-bang snapping between 0 and min when the planner's
@@ -213,6 +216,9 @@ class CmdVelControlNode(Node):
                 self._angular_engaged = False
         else:
             self._angular_engaged = False
+
+        if out.linear.x > 0.0 and not self._final_yaw_align_active:
+            out.angular.z = float(np.clip(out.angular.z + self.forward_yaw_bias, -self.max_angular_speed, self.max_angular_speed))
 
         self.cmd_pub.publish(out)
         self.prev_cmd = out
