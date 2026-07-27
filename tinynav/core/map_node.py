@@ -31,12 +31,19 @@ from tinynav.core.build_map_node import OdomPoseRecorder
 logger = logging.getLogger(__name__)
 
 _VIO_CONFIG_FILE = "vio_config.json"
+_PNP_CONFIG_FILE = "pnp_config.json"
 _POI_YAW_DONE_THRESHOLD_RAD = np.deg2rad(8.0)
 _POI_YAW_ALIGN_TIMEOUT_S = 10.0
+_DEFAULT_PNP_CONFIG = {
+    "relocalization_threshold": 0.75,
+    "relocalization_loop_top_k": 3,
+    "min_matched_features": 50,
+    "min_landmarks": 80,
+}
 
 
-def load_vio_config(tinynav_map_path: str) -> dict:
-    config_path = os.path.join(tinynav_map_path, _VIO_CONFIG_FILE)
+def _load_json_config(tinynav_map_path: str, file_name: str) -> dict:
+    config_path = os.path.join(tinynav_map_path, file_name)
     if not os.path.exists(config_path):
         return {}
     try:
@@ -44,8 +51,33 @@ def load_vio_config(tinynav_map_path: str) -> dict:
             data = json.load(f)
         return data if isinstance(data, dict) else {}
     except Exception as exc:
-        logger.warning(f"Failed to read {_VIO_CONFIG_FILE} from {tinynav_map_path}: {exc}")
+        logger.warning(f"Failed to read {file_name} from {tinynav_map_path}: {exc}")
         return {}
+
+
+def load_vio_config(tinynav_map_path: str) -> dict:
+    return _load_json_config(tinynav_map_path, _VIO_CONFIG_FILE)
+
+
+def load_pnp_config(tinynav_map_path: str) -> dict:
+    config = dict(_DEFAULT_PNP_CONFIG)
+    raw_config = _load_json_config(tinynav_map_path, _PNP_CONFIG_FILE)
+    for key, default_value in _DEFAULT_PNP_CONFIG.items():
+        value = raw_config.get(key, default_value)
+        if isinstance(default_value, float):
+            try:
+                config[key] = float(value)
+            except (TypeError, ValueError):
+                config[key] = default_value
+        else:
+            try:
+                config[key] = int(value)
+            except (TypeError, ValueError):
+                config[key] = default_value
+    config["relocalization_loop_top_k"] = max(1, config["relocalization_loop_top_k"])
+    config["min_matched_features"] = max(0, config["min_matched_features"])
+    config["min_landmarks"] = max(0, config["min_landmarks"])
+    return config
 
 
 def wrap_angle_rad(angle: float) -> float:
@@ -266,8 +298,11 @@ class MapNode(Node):
         self.loop_similarity_threshold = 0.90
         self.loop_top_k = 1
 
-        self.relocalization_threshold = 0.75
-        self.relocalization_loop_top_k = 3
+        self.pnp_config = load_pnp_config(tinynav_map_path)
+        self.relocalization_threshold = self.pnp_config["relocalization_threshold"]
+        self.relocalization_loop_top_k = self.pnp_config["relocalization_loop_top_k"]
+        self.min_relocalization_matches = self.pnp_config["min_matched_features"]
+        self.min_relocalization_landmarks = self.pnp_config["min_landmarks"]
 
         os.makedirs(f"{tinynav_db_path}/nav_temp", exist_ok=True)
         self.nav_temp_db = TinyNavDB(f"{tinynav_db_path}/nav_temp", is_scratch=True)
@@ -297,6 +332,13 @@ class MapNode(Node):
         self.get_logger().info(
             f"Loaded {_VIO_CONFIG_FILE}: "
             f"freeze_map_to_odom_after_init={self.freeze_map_to_odom_after_init}"
+        )
+        self.get_logger().info(
+            f"Loaded {_PNP_CONFIG_FILE}: "
+            f"relocalization_threshold={self.relocalization_threshold}, "
+            f"relocalization_loop_top_k={self.relocalization_loop_top_k}, "
+            f"min_matched_features={self.min_relocalization_matches}, "
+            f"min_landmarks={self.min_relocalization_landmarks}"
         )
 
         self.pois = {}
@@ -608,16 +650,22 @@ class MapNode(Node):
             reference_keyframe_pose = self.map_poses[timestamp_in_map]
             reference_depth, _, reference_features, _, _ = self.db.get_depth_embedding_features_images(timestamp_in_map)
             reference_matched_keypoints, keyframe_matched_keypoints, matches = self.match_keypoints(reference_features, keyframe_features)
-            if len(matches) < 50:
-                print(f"not enough matched features to relocalize, {len(matches)} < 50")
+            if len(matches) < self.min_relocalization_matches:
+                print(
+                    "not enough matched features to relocalize, "
+                    f"{len(matches)} < {self.min_relocalization_matches}"
+                )
                 continue
 
             point_3d_in_world, inliers = self.keypoint_with_depth_to_3d(reference_matched_keypoints, reference_depth, reference_keyframe_pose, self.map_K)
             point_3d_in_world_list = point_3d_in_world[inliers]
             point_2d_in_keyframe_list = keyframe_matched_keypoints[inliers]
             point_count = len(point_2d_in_keyframe_list)
-            if point_count <= 80:
-                print(f"not enough landmarks to relocalize, {point_count}")
+            if point_count <= self.min_relocalization_landmarks:
+                print(
+                    "not enough landmarks to relocalize, "
+                    f"{point_count} <= {self.min_relocalization_landmarks}"
+                )
                 continue
             pnp_candidates.append((point_3d_in_world_list, point_2d_in_keyframe_list))
 
