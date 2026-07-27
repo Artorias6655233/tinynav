@@ -1233,7 +1233,6 @@ class BackendNode(Ros2NodeManager):
             self._map_pose = None
             self._global_path = []
             self._nav_target_pose = None
-            self._nav_paused = False
             if 'map_node' in dead:
                 self._map_node_proc = None
             if 'cmd_vel_control' in dead:
@@ -1241,6 +1240,7 @@ class BackendNode(Ros2NodeManager):
             if raw_state == 'navigation':
                 self.state = 'idle'
         self._set_nav_active(False)
+        self._set_nav_paused(False)
         self._pub_state()
         return False
 
@@ -1306,12 +1306,18 @@ class BackendNode(Ros2NodeManager):
         self._launch_sensor_procs(_env)
         self.get_logger().info('Sensor procs restarted after map build')
 
+    def _set_nav_paused(self, paused: bool):
+        with self._lock:
+            self._nav_paused = paused
+        self._pause_pub.publish(Bool(data=paused))
+
     # ------------------------------------------------------------------ #
     # Nav nodes toggle                                                     #
     # ------------------------------------------------------------------ #
 
     def cmd_start_nav_nodes(self):
         self._set_nav_active(False)
+        self._set_nav_paused(False)
         _env = os.environ.copy()
         _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
         self._map_node_proc = self._launch_proc(
@@ -1350,7 +1356,7 @@ class BackendNode(Ros2NodeManager):
             self._map_pose = None
             self._global_path = []
             self._nav_target_pose = None
-            self._nav_paused = False
+        self._set_nav_paused(False)
         self.get_logger().info('Nav nodes stopped')
 
     def cmd_restart_nav_nodes(self):
@@ -1388,6 +1394,7 @@ class BackendNode(Ros2NodeManager):
             self._map_pose = None
             self._global_path = []
             self._nav_target_pose = None
+        self._set_nav_paused(False)
         self.state = 'idle'
         self._pub_state()
         self.get_logger().info('Nav nodes restarted (emergency stop)')
@@ -1995,6 +2002,7 @@ class BackendNode(Ros2NodeManager):
         with self._lock:
             self._active_nav_poi_ids = list(poi_ids)
             self._nav_progress = None
+        self._set_nav_paused(False)
 
         if not poi_ids:
             self._cmd_pois_pub.publish(String(data='{}'))
@@ -2036,6 +2044,7 @@ class BackendNode(Ros2NodeManager):
         with self._lock:
             nav_running = self._nav_nodes_running
         if nav_running:
+            self._set_nav_paused(False)
             self.state = 'navigation'
             self._pub_state()
         else:
@@ -2044,6 +2053,7 @@ class BackendNode(Ros2NodeManager):
 
     def cmd_nav_start(self, poi_id: str | None = None):
         self._ensure_nav_process_health()
+        self._set_nav_paused(False)
         if poi_id is not None:
             poi_int = int(poi_id)
             with self._lock:
@@ -2073,6 +2083,7 @@ class BackendNode(Ros2NodeManager):
             self._vio_guard_stopped = False
             self._vio_guard_recovering = False
             nav_running = self._nav_nodes_running
+        self._set_nav_paused(False)
         if nav_running:
             # Clear the active nav target so map_node stops pathing.
             self._publish_cmd_pois(None)
@@ -2083,14 +2094,10 @@ class BackendNode(Ros2NodeManager):
             self._stop_all()
 
     def cmd_nav_pause(self):
-        with self._lock:
-            self._nav_paused = True
-        self._pause_pub.publish(Bool(data=True))
+        self._set_nav_paused(True)
 
     def cmd_nav_resume(self):
-        with self._lock:
-            self._nav_paused = False
-        self._pause_pub.publish(Bool(data=False))
+        self._set_nav_paused(False)
 
     def cmd_action(self, action: str):
         self._action_pub.publish(String(data=f'play {action}'))
