@@ -1761,6 +1761,7 @@ class _CameraPanelState extends ConsumerState<_CameraPanel> {
           if (mapInfo != null &&
               planning != null &&
               planning.localized &&
+              selectedTopic != _pnpPreviewTopic &&
               baseUrl != null)
             Positioned(
               top: 8,
