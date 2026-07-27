@@ -1,6 +1,9 @@
 import rclpy
 import os
 import time
+import queue
+import threading
+from datetime import datetime
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Path, Odometry
@@ -32,6 +35,8 @@ logger = logging.getLogger(__name__)
 
 _VIO_CONFIG_FILE = "vio_config.json"
 _PNP_CONFIG_FILE = "pnp_config.json"
+PNP_MATCH_PREVIEW_TOPIC = "/map/pnp_match_preview"
+PNP_MATCH_INFO_TOPIC = "/map/pnp_match_info"
 _POI_YAW_DONE_THRESHOLD_RAD = np.deg2rad(8.0)
 _POI_YAW_ALIGN_TIMEOUT_S = 10.0
 _DEFAULT_PNP_CONFIG = {
@@ -100,6 +105,35 @@ def pose_from_position_yaw(position: np.ndarray, yaw_rad: float | None) -> np.nd
             [0.0, 0.0, 1.0],
         ])
     return pose
+
+
+def _format_timestamp_ns(timestamp_ns: int) -> str:
+    dt = datetime.fromtimestamp(timestamp_ns / 1e9)
+    return dt.strftime("%H:%M:%S.%f")[:-3]
+
+
+def _ensure_bgr(image: np.ndarray | None) -> np.ndarray | None:
+    if image is None:
+        return None
+    if image.ndim == 2:
+        return cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+    if image.ndim == 3 and image.shape[2] == 4:
+        return cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
+    return image
+
+
+def _rotation_matrix_to_rpy_deg(rotation: np.ndarray) -> tuple[float, float, float]:
+    sy = float(np.sqrt(rotation[0, 0] ** 2 + rotation[1, 0] ** 2))
+    singular = sy < 1e-6
+    if not singular:
+        roll = float(np.arctan2(rotation[2, 1], rotation[2, 2]))
+        pitch = float(np.arctan2(-rotation[2, 0], sy))
+        yaw = float(np.arctan2(rotation[1, 0], rotation[0, 0]))
+    else:
+        roll = float(np.arctan2(-rotation[1, 2], rotation[1, 1]))
+        pitch = float(np.arctan2(-rotation[2, 0], sy))
+        yaw = 0.0
+    return tuple(np.degrees([roll, pitch, yaw]))
 
 
 
@@ -276,6 +310,8 @@ class MapNode(Node):
         self.pose_graph_trajectory_pub = self.create_publisher(Path, "/mapping/pose_graph_trajectory", 10)
         self.relocation_pub = self.create_publisher(Odometry, '/map/relocalization', 10)
         self.current_pose_in_map_pub = self.create_publisher(Odometry, "/mapping/current_pose_in_map", 10)
+        self.pnp_match_preview_pub = self.create_publisher(Image, PNP_MATCH_PREVIEW_TOPIC, 1)
+        self.pnp_match_info_pub = self.create_publisher(String, PNP_MATCH_INFO_TOPIC, 1)
 
         # Add stop signal subscription and data saved publisher
         self.localization_stop_sub = self.create_subscription(Bool, '/benchmark/stop', self.localization_stop_callback, 10)
@@ -294,6 +330,14 @@ class MapNode(Node):
         self.pose_graph_used_pose = {}
         self.relative_pose_constraint = []
         self.last_keyframe_timestamp = None
+        self._pnp_preview_jobs: queue.Queue = queue.Queue(maxsize=1)
+        self._pnp_preview_stop_event = threading.Event()
+        self._pnp_preview_worker = threading.Thread(
+            target=self._pnp_preview_worker_loop,
+            name="pnp_preview_worker",
+            daemon=True,
+        )
+        self._pnp_preview_worker.start()
 
         self.loop_similarity_threshold = 0.90
         self.loop_top_k = 1
@@ -632,9 +676,148 @@ class MapNode(Node):
             path_msg.poses.append(pose)
         self.pose_graph_trajectory_pub.publish(path_msg)
 
-    def relocalize_with_depth(self, keyframe: np.ndarray, keyframe_features: dict, K: np.ndarray | None) -> tuple[bool, np.ndarray, float]:
+    def _has_pnp_preview_subscribers(self) -> bool:
+        return self.pnp_match_preview_pub.get_subscription_count() > 0
+
+    def _has_pnp_info_subscribers(self) -> bool:
+        return self.pnp_match_info_pub.get_subscription_count() > 0
+
+    def _enqueue_pnp_match_job(self, job: dict) -> None:
+        if not (self._has_pnp_preview_subscribers() or self._has_pnp_info_subscribers()):
+            return
+        try:
+            if self._pnp_preview_jobs.full():
+                self._pnp_preview_jobs.get_nowait()
+            self._pnp_preview_jobs.put_nowait(job)
+        except queue.Empty:
+            pass
+        except queue.Full:
+            pass
+
+    def _build_pnp_match_info(
+        self,
+        keyframe_timestamp_ns: int,
+        map_timestamp_ns: int,
+        similarity: float,
+        match_elapsed_ms: float,
+        inlier_count: int,
+        point_count: int,
+        pose_cov_weight: float,
+        pose_in_camera: np.ndarray,
+    ) -> dict:
+        pose_in_world = np.linalg.inv(pose_in_camera)
+        tx, ty, tz = pose_in_world[:3, 3]
+        roll_deg, pitch_deg, yaw_deg = _rotation_matrix_to_rpy_deg(pose_in_world[:3, :3])
+        return {
+            "render_time": _format_timestamp_ns(int(time.time() * 1e9)),
+            "query_keyframe_time": _format_timestamp_ns(keyframe_timestamp_ns),
+            "map_keyframe_time": _format_timestamp_ns(map_timestamp_ns),
+            "pnp_time_ms": round(float(match_elapsed_ms), 1),
+            "similarity": round(float(similarity), 3),
+            "inliers": int(inlier_count),
+            "point_count": int(point_count),
+            "weight": round(float(pose_cov_weight), 3),
+            "pose_xyz_world_m": {
+                "x": round(float(tx), 3),
+                "y": round(float(ty), 3),
+                "z": round(float(tz), 3),
+            },
+            "pose_rpy_world_deg": {
+                "r": round(float(roll_deg), 1),
+                "p": round(float(pitch_deg), 1),
+                "y": round(float(yaw_deg), 1),
+            },
+        }
+
+    def _publish_pnp_match_info(self, info: dict) -> None:
+        self.pnp_match_info_pub.publish(String(data=json.dumps(info)))
+
+    def _pnp_preview_worker_loop(self) -> None:
+        while not self._pnp_preview_stop_event.is_set():
+            try:
+                job = self._pnp_preview_jobs.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if job is None:
+                continue
+            has_preview = self._has_pnp_preview_subscribers()
+            has_info = self._has_pnp_info_subscribers()
+            if not (has_preview or has_info):
+                continue
+            try:
+                info = self._build_pnp_match_info(
+                    keyframe_timestamp_ns=job["keyframe_timestamp_ns"],
+                    map_timestamp_ns=job["map_timestamp_ns"],
+                    similarity=job["similarity"],
+                    match_elapsed_ms=job["match_elapsed_ms"],
+                    inlier_count=job["inlier_count"],
+                    point_count=job["point_count"],
+                    pose_cov_weight=job["pose_cov_weight"],
+                    pose_in_camera=job["pose_in_camera"],
+                )
+                if has_info:
+                    self._publish_pnp_match_info(info)
+                if has_preview and job["keyframe"] is not None:
+                    _, _, _, _, infra1_loader = self.db.get_depth_embedding_features_images(job["map_timestamp_ns"])
+                    self._publish_pnp_match_preview(
+                        keyframe=job["keyframe"],
+                        map_image=infra1_loader(),
+                        map_keypoints=job["map_keypoints"],
+                        keyframe_keypoints=job["keyframe_keypoints"],
+                        pnp_inlier_indices=job["pnp_inlier_indices"],
+                    )
+            except Exception as exc:
+                self.get_logger().warning(f"Failed to publish pnp preview: {exc}")
+
+    def _publish_pnp_match_preview(
+        self,
+        keyframe: np.ndarray,
+        map_image: np.ndarray | None,
+        map_keypoints: np.ndarray,
+        keyframe_keypoints: np.ndarray,
+        pnp_inlier_indices: np.ndarray,
+    ) -> None:
+        map_image_bgr = _ensure_bgr(map_image)
+        keyframe_bgr = _ensure_bgr(keyframe)
+        if map_image_bgr is None or keyframe_bgr is None:
+            return
+        if len(map_keypoints) == 0 or len(keyframe_keypoints) == 0 or len(pnp_inlier_indices) == 0:
+            return
+        valid_indices = pnp_inlier_indices[(pnp_inlier_indices >= 0) & (pnp_inlier_indices < len(map_keypoints))]
+        if len(valid_indices) == 0:
+            return
+        map_keypoints = map_keypoints[valid_indices]
+        keyframe_keypoints = keyframe_keypoints[valid_indices]
+        pair_count = min(len(map_keypoints), len(keyframe_keypoints), 160)
+        if pair_count == 0:
+            return
+        if pair_count < len(map_keypoints):
+            pair_indices = np.linspace(0, len(map_keypoints) - 1, pair_count, dtype=np.int64)
+            map_keypoints = map_keypoints[pair_indices]
+            keyframe_keypoints = keyframe_keypoints[pair_indices]
+        sequential_matches = np.stack(
+            [np.arange(pair_count, dtype=np.int64), np.arange(pair_count, dtype=np.int64)],
+            axis=1,
+        )
+        preview = draw_image_match_origin(
+            map_image_bgr,
+            keyframe_bgr,
+            map_keypoints.astype(np.float32),
+            keyframe_keypoints.astype(np.float32),
+            sequential_matches,
+        )
+        self.pnp_match_preview_pub.publish(self.bridge.cv2_to_imgmsg(preview, encoding="bgr8"))
+
+    def relocalize_with_depth(
+        self,
+        keyframe: np.ndarray,
+        keyframe_timestamp_ns: int,
+        keyframe_features: dict,
+        K: np.ndarray | None,
+    ) -> tuple[bool, np.ndarray, float]:
         if K is None:
             return False, np.eye(4), -np.inf
+        match_start_time = time.perf_counter()
         query_embedding = self.get_embeddings(keyframe)
         query_embedding_normed = query_embedding / np.linalg.norm(query_embedding)
 
@@ -645,6 +828,8 @@ class MapNode(Node):
             return False, np.eye(4), -np.inf
 
         pnp_candidates = []
+        candidate_visuals = []
+        need_pnp_debug = self._has_pnp_preview_subscribers() or self._has_pnp_info_subscribers()
         for idx_in_map, similarity in idx_and_similarity_array:
             timestamp_in_map = self.map_embeddings_idx_to_timestamp[idx_in_map]
             reference_keyframe_pose = self.map_poses[timestamp_in_map]
@@ -668,10 +853,37 @@ class MapNode(Node):
                 )
                 continue
             pnp_candidates.append((point_3d_in_world_list, point_2d_in_keyframe_list))
+            if need_pnp_debug:
+                candidate_visuals.append(
+                    {
+                        "timestamp_in_map": int(timestamp_in_map),
+                        "similarity": float(similarity),
+                        "map_keypoints": reference_matched_keypoints[inliers],
+                        "keyframe_keypoints": keyframe_matched_keypoints[inliers],
+                    }
+                )
 
-        success, best_pose_in_camera, pose_cov_weight, _, _, _ = rerank_by_pnp_inliers(pnp_candidates, self.map_K)
+        success, best_pose_in_camera, pose_cov_weight, best_candidate_index, best_inlier_count, best_point_count, best_inlier_indices = rerank_by_pnp_inliers(pnp_candidates, self.map_K)
         if success:
             print(f"relocalization pose : {best_pose_in_camera}")
+            if need_pnp_debug and 0 <= best_candidate_index < len(candidate_visuals):
+                best_visual = candidate_visuals[best_candidate_index]
+                self._enqueue_pnp_match_job(
+                    {
+                        "keyframe": keyframe.copy() if self._has_pnp_preview_subscribers() else None,
+                        "keyframe_timestamp_ns": keyframe_timestamp_ns,
+                        "map_timestamp_ns": best_visual["timestamp_in_map"],
+                        "map_keypoints": best_visual["map_keypoints"].copy(),
+                        "keyframe_keypoints": best_visual["keyframe_keypoints"].copy(),
+                        "pnp_inlier_indices": best_inlier_indices.copy(),
+                        "similarity": best_visual["similarity"],
+                        "match_elapsed_ms": (time.perf_counter() - match_start_time) * 1000.0,
+                        "inlier_count": best_inlier_count,
+                        "point_count": best_point_count,
+                        "pose_cov_weight": pose_cov_weight,
+                        "pose_in_camera": best_pose_in_camera.copy(),
+                    }
+                )
             return True, best_pose_in_camera, pose_cov_weight
 
         print("no valid PnP relocalization candidate found")
@@ -709,11 +921,11 @@ class MapNode(Node):
     @Timer(name="Relocalization loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms")
     def keyframe_relocalization(self, timestamp, image:np.ndarray) -> tuple[bool, np.ndarray]:
         features = asyncio.run(self.super_point_extractor.infer(image))
-        res, pose_in_camera, pose_cov_weight = self.relocalize_with_depth(image, features, self.K)
+        timestamp_ns = int(timestamp.sec * 1e9) + int(timestamp.nanosec)
+        res, pose_in_camera, pose_cov_weight = self.relocalize_with_depth(image, timestamp_ns, features, self.K)
         if res:
             # publish the relocalization pose for debug
             pose_in_world = np.linalg.inv(pose_in_camera)
-            timestamp_ns = int(timestamp.sec * 1e9) + int(timestamp.nanosec)
             self.relocation_pub.publish(np2msg(pose_in_world, timestamp, "world", "camera"))
             self.relocalization_poses[timestamp_ns] = pose_in_world
             self.relocalization_pose_weights[timestamp_ns] = pose_cov_weight
@@ -746,6 +958,15 @@ class MapNode(Node):
 
     def destroy_node(self):
         try:
+            self._pnp_preview_stop_event.set()
+            try:
+                if self._pnp_preview_jobs.full():
+                    self._pnp_preview_jobs.get_nowait()
+                self._pnp_preview_jobs.put_nowait(None)
+            except Exception:
+                pass
+            if self._pnp_preview_worker.is_alive():
+                self._pnp_preview_worker.join(timeout=1.0)
             self.save_relocalization_poses()
             self.nav_temp_db.close()
             self.db.close()

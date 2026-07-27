@@ -104,6 +104,69 @@ class Pose {
       );
 }
 
+class Vec3 {
+  final double x;
+  final double y;
+  final double z;
+
+  const Vec3({
+    required this.x,
+    required this.y,
+    required this.z,
+  });
+}
+
+class PnpPreviewInfo {
+  final String renderTime;
+  final String queryKeyframeTime;
+  final String mapKeyframeTime;
+  final double pnpTimeMs;
+  final double similarity;
+  final int inliers;
+  final int pointCount;
+  final double weight;
+  final Vec3 poseXyzWorldM;
+  final Vec3 poseRpyWorldDeg;
+
+  const PnpPreviewInfo({
+    required this.renderTime,
+    required this.queryKeyframeTime,
+    required this.mapKeyframeTime,
+    required this.pnpTimeMs,
+    required this.similarity,
+    required this.inliers,
+    required this.pointCount,
+    required this.weight,
+    required this.poseXyzWorldM,
+    required this.poseRpyWorldDeg,
+  });
+
+  factory PnpPreviewInfo.fromJson(Map<String, dynamic> json) {
+    final xyz = json['pose_xyz_world_m'] as Map<String, dynamic>? ?? const {};
+    final rpy = json['pose_rpy_world_deg'] as Map<String, dynamic>? ?? const {};
+    return PnpPreviewInfo(
+      renderTime: json['render_time'] as String? ?? '-',
+      queryKeyframeTime: json['query_keyframe_time'] as String? ?? '-',
+      mapKeyframeTime: json['map_keyframe_time'] as String? ?? '-',
+      pnpTimeMs: (json['pnp_time_ms'] as num?)?.toDouble() ?? 0.0,
+      similarity: (json['similarity'] as num?)?.toDouble() ?? 0.0,
+      inliers: (json['inliers'] as num?)?.toInt() ?? 0,
+      pointCount: (json['point_count'] as num?)?.toInt() ?? 0,
+      weight: (json['weight'] as num?)?.toDouble() ?? 0.0,
+      poseXyzWorldM: Vec3(
+        x: (xyz['x'] as num?)?.toDouble() ?? 0.0,
+        y: (xyz['y'] as num?)?.toDouble() ?? 0.0,
+        z: (xyz['z'] as num?)?.toDouble() ?? 0.0,
+      ),
+      poseRpyWorldDeg: Vec3(
+        x: (rpy['r'] as num?)?.toDouble() ?? 0.0,
+        y: (rpy['p'] as num?)?.toDouble() ?? 0.0,
+        z: (rpy['y'] as num?)?.toDouble() ?? 0.0,
+      ),
+    );
+  }
+}
+
 class MapInfo {
   final String imageUrl;
   final double originX;

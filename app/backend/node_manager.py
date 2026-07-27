@@ -41,18 +41,22 @@ _MAPPING_PERCENT_PREFIX = 'MAPPING_PERCENT:'
 
 _COLOR_TOPIC_REALSENSE = '/camera/camera/color/image_raw'
 _COLOR_TOPIC_LOOPER = '/camera/camera/color/image_rect_raw/compressed'
+_PNP_PREVIEW_TOPIC = '/map/pnp_match_preview'
+_PNP_INFO_TOPIC = '/map/pnp_match_info'
 
 _IMAGE_TOPICS_REALSENSE = [
     _COLOR_TOPIC_REALSENSE,
     '/camera/camera/infra1/image_rect_raw',
     '/camera/camera/infra2/image_rect_raw',
     '/slam/depth',
+    _PNP_PREVIEW_TOPIC,
 ]
 _IMAGE_TOPICS_LOOPER = [
     _COLOR_TOPIC_LOOPER,
     '/camera/camera/infra1/image_rect_raw',
     '/camera/camera/infra2/image_rect_raw',
     '/slam/depth',
+    _PNP_PREVIEW_TOPIC,
 ]
 _IMAGE_TOPICS_ALL = _IMAGE_TOPICS_REALSENSE  # fallback
 _PREVIEW_MIN_INTERVAL = 0.05  # 20 fps
@@ -112,6 +116,7 @@ class BackendNode(Ros2NodeManager):
         self.pose_callbacks: list = []
         self.state_callbacks: list = []
         self.preview_callbacks: dict[str, list] = {}  # topic -> [callbacks]
+        self.pnp_info_callbacks: list = []
 
         # Planning / localization state (read via get_planning_snapshot)
         self._odom_pose: dict | None = None
@@ -128,6 +133,8 @@ class BackendNode(Ros2NodeManager):
         self._grid_info: dict | None = None
         self._nav_target_pose: dict | None = None
         self._last_mapping_image_stamp_ns: int | None = None
+        self._pnp_info: dict | None = None
+        self._pnp_info_sub = None
 
         # Debug recording (independent of main state machine)
         self._debug_record_proc: subprocess.Popen | None = None
@@ -969,6 +976,53 @@ class BackendNode(Ros2NodeManager):
             return
         self._publish_preview_frame(topic, arr)
 
+    def add_pnp_info_callback(self, cb) -> bool:
+        with self._lock:
+            self.pnp_info_callbacks.append(cb)
+            first = len(self.pnp_info_callbacks) == 1
+        if first:
+            self._create_pnp_info_sub()
+        return True
+
+    def remove_pnp_info_callback(self, cb):
+        with self._lock:
+            self.pnp_info_callbacks = [
+                registered for registered in self.pnp_info_callbacks if registered is not cb
+            ]
+            empty = len(self.pnp_info_callbacks) == 0
+        if empty:
+            self._destroy_pnp_info_sub()
+
+    def _create_pnp_info_sub(self):
+        if self._pnp_info_sub is not None:
+            return
+        self._pnp_info_sub = self.create_subscription(
+            String,
+            _PNP_INFO_TOPIC,
+            self._on_pnp_info,
+            1,
+        )
+
+    def _destroy_pnp_info_sub(self):
+        if self._pnp_info_sub is None:
+            return
+        self.destroy_subscription(self._pnp_info_sub)
+        self._pnp_info_sub = None
+
+    def _on_pnp_info(self, msg: String):
+        try:
+            payload = json.loads(msg.data)
+        except json.JSONDecodeError:
+            return
+        with self._lock:
+            self._pnp_info = payload
+            callbacks = list(self.pnp_info_callbacks)
+        for cb in callbacks:
+            try:
+                cb(payload)
+            except Exception:
+                pass
+
     def get_planning_snapshot(self) -> dict:
         with self._lock:
             path_snapshot = list(self._global_path)
@@ -1011,6 +1065,12 @@ class BackendNode(Ros2NodeManager):
     def get_preview_frame(self, topic: str) -> bytes:
         with self._lock:
             return self._last_frame.get(topic, b'')
+
+    def get_pnp_info(self) -> dict | None:
+        with self._lock:
+            if self._pnp_info is None:
+                return None
+            return dict(self._pnp_info)
 
     def get_preview_profile(self, quality: str) -> tuple[int, int] | None:
         return _PREVIEW_PROFILES.get(quality)

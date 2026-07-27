@@ -4,6 +4,7 @@ WebSocket endpoints:
   WS /ws/pose        — pushes pose whenever a new Odometry arrives
   WS /ws/map-update  — pushes a notification when map files change
   WS /ws/preview     — streams JPEG frames for a given image topic
+  WS /ws/pnp-info    — pushes PnP match metadata for the preview footer
   WS /ws/planning    — polls planning snapshot at 5 fps
   WS /ws/teleop      — receives cmd_vel commands from the client
 """
@@ -213,6 +214,38 @@ async def ws_preview(
 
 
 # --------------------------------------------------------------------------- #
+# /ws/pnp-info  — pushes latest PnP preview metadata                          #
+# --------------------------------------------------------------------------- #
+
+@router.websocket('/ws/pnp-info')
+async def ws_pnp_info(ws: WebSocket):
+    await ws.accept()
+    queue: asyncio.Queue = asyncio.Queue(maxsize=4)
+    loop = asyncio.get_event_loop()
+
+    def _on_info(payload: dict):
+        loop.call_soon_threadsafe(lambda: _safe_put(queue, payload))
+
+    node = runner.node
+    if node is None:
+        await ws.close(code=1013)
+        return
+
+    node.add_pnp_info_callback(_on_info)
+    latest = node.get_pnp_info()
+    if latest is not None:
+        _safe_put(queue, latest)
+    try:
+        while True:
+            payload = await queue.get()
+            await ws.send_text(json.dumps(payload))
+    except WebSocketDisconnect:
+        pass
+    finally:
+        node.remove_pnp_info_callback(_on_info)
+
+
+# --------------------------------------------------------------------------- #
 # /ws/teleop  — receives velocity commands and publishes to /cmd_vel          #
 # --------------------------------------------------------------------------- #
 
@@ -239,3 +272,4 @@ async def ws_teleop(ws: WebSocket):
             node.publish_cmd_vel(0.0, 0.0, 0.0)
         except Exception:
             pass
+

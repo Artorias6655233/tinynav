@@ -220,7 +220,7 @@ def rerank_by_pnp_inliers(
     K: np.ndarray,
     min_point_count: int = 80,
     min_inlier_count: int = 50,
-) -> tuple[bool, np.ndarray, float, int, int, int]:
+) -> tuple[bool, np.ndarray, float, int, int, int, np.ndarray]:
     """
     Estimate PnP for each candidate and return the pose with the most inliers.
 
@@ -231,12 +231,14 @@ def rerank_by_pnp_inliers(
         min_inlier_count: minimum number of PnP inliers required.
 
     Returns:
-        success, pose, inlier_ratio, best_candidate_index, best_inlier_count, best_point_count.
+        success, pose, inlier_ratio, best_candidate_index, best_inlier_count, best_point_count,
+        best_inlier_indices.
     """
     best_pose = None
     best_candidate_index = -1
     best_inlier_count = 0
     best_point_count = 0
+    best_inlier_indices = np.empty(0, dtype=np.int64)
 
     for candidate_index, (points_3d, points_2d) in enumerate(pnp_candidates):
         point_count = len(points_2d)
@@ -252,15 +254,24 @@ def rerank_by_pnp_inliers(
             best_candidate_index = candidate_index
             best_inlier_count = inlier_count
             best_point_count = point_count
+            best_inlier_indices = inliers.flatten().astype(np.int64)
             best_pose = np.eye(4)
             R_mat, _ = cv2.Rodrigues(rvec)
             best_pose[:3, :3] = R_mat
             best_pose[:3, 3] = tvec.reshape(3)
 
     if best_pose is None:
-        return False, np.eye(4), -np.inf, -1, 0, 0
+        return False, np.eye(4), -np.inf, -1, 0, 0, np.empty(0, dtype=np.int64)
 
-    return True, best_pose, best_inlier_count / best_point_count, best_candidate_index, best_inlier_count, best_point_count
+    return (
+        True,
+        best_pose,
+        best_inlier_count / best_point_count,
+        best_candidate_index,
+        best_inlier_count,
+        best_point_count,
+        best_inlier_indices,
+    )
 
 @lru_cache_numpy(maxsize=128)
 def estimate_pose(kpts_prev, kpts_curr, depth, K, idx_valid=None):
@@ -310,3 +321,4 @@ def uf_all_sets_list(uf, min_component_size=1):
         if part.size >= int(min_component_size):
             out.append(np.sort(part).tolist())
     return out
+

@@ -33,11 +33,13 @@ final deviceStatusProvider = StreamProvider<DeviceStatus>((ref) {
   final ip = ref.watch(deviceIpProvider);
   if (ip == null) return const Stream.empty();
 
-  final channel = WebSocketChannel.connect(Uri.parse('ws://$ip:8000/ws/status'));
+  final channel =
+      WebSocketChannel.connect(Uri.parse('ws://$ip:8000/ws/status'));
   ref.onDispose(() => channel.sink.close());
 
   return channel.stream.map(
-    (data) => DeviceStatus.fromJson(jsonDecode(data as String) as Map<String, dynamic>),
+    (data) => DeviceStatus.fromJson(
+        jsonDecode(data as String) as Map<String, dynamic>),
   );
 });
 
@@ -46,11 +48,13 @@ final navProgressStreamProvider = StreamProvider<NavProgress>((ref) {
   final ip = ref.watch(deviceIpProvider);
   if (ip == null) return const Stream.empty();
 
-  final channel = WebSocketChannel.connect(Uri.parse('ws://$ip:8000/ws/nav-progress'));
+  final channel =
+      WebSocketChannel.connect(Uri.parse('ws://$ip:8000/ws/nav-progress'));
   ref.onDispose(() => channel.sink.close());
 
   return channel.stream.map(
-    (data) => NavProgress.fromJson(jsonDecode(data as String) as Map<String, dynamic>),
+    (data) => NavProgress.fromJson(
+        jsonDecode(data as String) as Map<String, dynamic>),
   );
 });
 
@@ -77,7 +81,8 @@ final mapInfoProvider = FutureProvider.autoDispose<MapInfo?>((ref) async {
     final resp = await dio.get('/map/current');
     return MapInfo.fromJson(resp.data as Map<String, dynamic>);
   } on DioException catch (e) {
-    if (e.response?.statusCode == 404 || e.response?.statusCode == 503) return null;
+    if (e.response?.statusCode == 404 || e.response?.statusCode == 503)
+      return null;
     rethrow;
   }
 });
@@ -96,7 +101,8 @@ final sensorModeProvider = FutureProvider.autoDispose<String>((ref) async {
 });
 
 /// Available image topics from the backend.
-final imageTopicsProvider = FutureProvider.autoDispose<List<String>>((ref) async {
+final imageTopicsProvider =
+    FutureProvider.autoDispose<List<String>>((ref) async {
   final dio = ref.watch(dioProvider);
   final baseUrl = ref.watch(baseUrlProvider);
   if (baseUrl == null) return [];
@@ -161,29 +167,48 @@ final previewStreamProvider =
   },
 );
 
+final pnpPreviewInfoProvider =
+    StreamProvider.autoDispose<PnpPreviewInfo>((ref) {
+  final ip = ref.watch(deviceIpProvider);
+  if (ip == null) return const Stream.empty();
+
+  final channel =
+      WebSocketChannel.connect(Uri.parse('ws://$ip:8000/ws/pnp-info'));
+  ref.onDispose(() => channel.sink.close());
+
+  return channel.stream.map(
+    (data) => PnpPreviewInfo.fromJson(
+        jsonDecode(data as String) as Map<String, dynamic>),
+  );
+});
+
 /// Streams PlanningState from WS /ws/planning at ~5 fps.
 final planningStreamProvider = StreamProvider<PlanningState>((ref) {
   final ip = ref.watch(deviceIpProvider);
   if (ip == null) return const Stream.empty();
 
-  final channel = WebSocketChannel.connect(Uri.parse('ws://$ip:8000/ws/planning'));
+  final channel =
+      WebSocketChannel.connect(Uri.parse('ws://$ip:8000/ws/planning'));
   ref.onDispose(() => channel.sink.close());
 
   return channel.stream.map(
-    (data) => PlanningState.fromJson(jsonDecode(data as String) as Map<String, dynamic>),
+    (data) => PlanningState.fromJson(
+        jsonDecode(data as String) as Map<String, dynamic>),
   );
 });
 
 /// One-shot system info from GET /device/sysinfo. autoDispose → re-fetches on each page enter.
 final sysInfoProvider = FutureProvider.autoDispose<SysInfo>((ref) async {
   final dio = ref.watch(dioProvider);
-  if (ref.watch(baseUrlProvider) == null) throw Exception('No device connected');
+  if (ref.watch(baseUrlProvider) == null)
+    throw Exception('No device connected');
   final resp = await dio.get('/device/sysinfo');
   return SysInfo.fromJson(resp.data as Map<String, dynamic>);
 });
 
 /// File lists from /files/bags and /files/maps.
-final bagFilesProvider = FutureProvider.autoDispose<List<FileEntry>>((ref) async {
+final bagFilesProvider =
+    FutureProvider.autoDispose<List<FileEntry>>((ref) async {
   final dio = ref.watch(dioProvider);
   if (ref.watch(baseUrlProvider) == null) return [];
   try {
@@ -196,7 +221,8 @@ final bagFilesProvider = FutureProvider.autoDispose<List<FileEntry>>((ref) async
   }
 });
 
-final mapFilesProvider = FutureProvider.autoDispose<List<FileEntry>>((ref) async {
+final mapFilesProvider =
+    FutureProvider.autoDispose<List<FileEntry>>((ref) async {
   final dio = ref.watch(dioProvider);
   if (ref.watch(baseUrlProvider) == null) return [];
   try {
@@ -209,7 +235,8 @@ final mapFilesProvider = FutureProvider.autoDispose<List<FileEntry>>((ref) async
   }
 });
 
-final debugBagFilesProvider = FutureProvider.autoDispose<List<FileEntry>>((ref) async {
+final debugBagFilesProvider =
+    FutureProvider.autoDispose<List<FileEntry>>((ref) async {
   final dio = ref.watch(dioProvider);
   if (ref.watch(baseUrlProvider) == null) return [];
   try {
@@ -223,10 +250,11 @@ final debugBagFilesProvider = FutureProvider.autoDispose<List<FileEntry>>((ref) 
 });
 
 /// Metadata + POIs for a named map folder (from GET /map/files/{name}).
-final mapFileInfoProvider =
-    FutureProvider.autoDispose.family<MapFileInfo, String>((ref, mapName) async {
+final mapFileInfoProvider = FutureProvider.autoDispose
+    .family<MapFileInfo, String>((ref, mapName) async {
   final dio = ref.watch(dioProvider);
-  if (ref.watch(baseUrlProvider) == null) throw Exception('No device connected');
+  if (ref.watch(baseUrlProvider) == null)
+    throw Exception('No device connected');
   final resp = await dio.get('/map/preview/$mapName');
   return MapFileInfo.fromJson(resp.data as Map<String, dynamic>);
 });
@@ -245,3 +273,4 @@ final poisProvider = FutureProvider.autoDispose<List<Poi>>((ref) async {
     rethrow;
   }
 });
+
